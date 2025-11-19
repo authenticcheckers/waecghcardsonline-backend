@@ -1,3 +1,4 @@
+// server.js — fixed version
 import express from 'express';
 import dotenv from 'dotenv';
 import bodyParser from 'body-parser';
@@ -17,10 +18,11 @@ dotenv.config();
 
 const app = express();
 
-// ---------- CORS FIX ----------
+// ---------- CORS ----------
 app.use(cors({
   origin: [
     "https://waeccardsonline.vercel.app",
+    "https://waeccardsonline-frontend.vercel.app",
     "http://localhost:3000"
   ],
   methods: "GET,POST,PUT,DELETE,OPTIONS",
@@ -28,16 +30,18 @@ app.use(cors({
 }));
 // -----------------------------------------------------
 
-app.use(bodyParser.json());
+// Capture raw body for webhook signature verification (Paystack)
+app.use(bodyParser.json({
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 const DB_FILE = process.env.DB_FILE || './data.db';
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || '';
 
-
-// ---------- FIXED ARKESEL variables ----------
+// ---------- ARKESEL variables ----------
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY || '';
-const ARKESEL_SENDER = process.env.ARKESEL_SENDER || 'WAECCARDS';
+const ARKESEL_SENDER = process.env.ARKESEL_SENDER || 'WAECCARD';
 // ----------------------------------------------------------
 
 const JWT_SECRET = process.env.JWT_SECRET || 'please_change_me';
@@ -267,25 +271,24 @@ app.post('/verify-payment', async (req, res) => {
   if (!reference) return res.status(400).json({ success: false, message: 'Missing reference' });
 
   try {
-    if (!PAYSTACK_SECRET)
+    if (!PAYSTACK_SECRET_KEY)
       return res.status(500).json({ success: false, message: 'Server not configured with Paystack' });
 
-    const verify = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-  headers: {
-    Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`
-  }
-});
+    // verify with Paystack using axios
+    const verifyUrl = `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`;
+    const verifyResp = await axios.get(verifyUrl, {
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` }
+    });
 
-
-    if (!verify.data || !verify.data.data || verify.data.status !== true)
+    if (!verifyResp.data || !verifyResp.data.data || verifyResp.data.status !== true)
       return res.status(400).json({ success: false, message: 'Paystack verification failed' });
 
-    const paid = verify.data.data.status === 'success';
-    const amount = (verify.data.data.amount || 0) / 100;
+    const paid = verifyResp.data.data.status === 'success';
+    const amount = (verifyResp.data.data.amount || 0) / 100;
 
     if (!paid) return res.status(400).json({ success: false, message: 'Payment not successful' });
 
-    // reserve voucher
+    // reserve voucher (atomic)
     await db.run('BEGIN TRANSACTION');
     const row = await db.get("SELECT id, serial, pin FROM vouchers WHERE status='unused' ORDER BY id ASC LIMIT 1");
     if (!row) {
@@ -332,17 +335,20 @@ app.post('/verify-payment', async (req, res) => {
 // ------------------ PAYSTACK WEBHOOK ------------------
 app.post('/pay/webhook', async (req, res) => {
   try {
-    if (PAYSTACK_SECRET) {
-      const hash = crypto.createHmac('sha512', PAYSTACK_SECRET)
-        .update(JSON.stringify(req.body))
-        .digest('hex');
-
-      if (hash !== req.headers['x-paystack-signature']) {
+    // Verify signature using raw body saved earlier
+    if (PAYSTACK_SECRET_KEY) {
+      const raw = req.rawBody || Buffer.from(JSON.stringify(req.body));
+      const hash = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY).update(raw).digest('hex');
+      const sig = req.headers['x-paystack-signature'] || req.headers['X-Paystack-Signature'];
+      if (!sig || hash !== sig) {
+        console.warn('Invalid Paystack signature', { expected: hash, got: sig });
         return res.status(401).send('Invalid signature');
       }
     }
 
-    const data = req.body.data || {};
+    // parse event safely from rawBody or req.body
+    const event = (typeof req.body === 'object' && Object.keys(req.body).length) ? req.body : JSON.parse((req.rawBody || '').toString('utf8'));
+    const data = event.data || {};
     const metadata = data.metadata || {};
 
     const phone = metadata.phone || null;

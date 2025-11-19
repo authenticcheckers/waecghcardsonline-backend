@@ -32,7 +32,8 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 const DB_FILE = process.env.DB_FILE || './data.db';
-const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || '';
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+
 
 // ---------- FIXED ARKESEL variables ----------
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY || '';

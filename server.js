@@ -18,6 +18,24 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// --- CORS FIX ---
+import cors from 'cors';
+
+app.use(cors({
+  origin: [
+    'https://waeccardsonline.vercel.app',   // your frontend
+    'http://localhost:3000',                // local testing
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+// handle preflight
+app.options('*', cors());
+// --- END CORS FIX ---
+
+
 const DB_FILE = process.env.DB_FILE || './data.db';
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || '';
 const ARKESEL_API_KEY = process.env.ARKESel_API_KEY || '';

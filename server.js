@@ -270,10 +270,12 @@ app.post('/verify-payment', async (req, res) => {
     if (!PAYSTACK_SECRET)
       return res.status(500).json({ success: false, message: 'Server not configured with Paystack' });
 
-    const verify = await axios.get(
-      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
-      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
-    );
+    const verify = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+  headers: {
+    Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`
+  }
+});
+
 
     if (!verify.data || !verify.data.data || verify.data.status !== true)
       return res.status(400).json({ success: false, message: 'Paystack verification failed' });

@@ -10,7 +10,8 @@ import bcrypt from 'bcrypt';
 import axios from 'axios';
 import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
-import csvParse from 'csv-parse/lib/sync';
+import { parse } from "csv-parse/sync";
+
 
 dotenv.config();
 

@@ -1,4 +1,4 @@
-// server.js — corrected version using default Arkesel sender
+// server.js — corrected and Express/EJS-ready
 import express from 'express';
 import dotenv from 'dotenv';
 import bodyParser from 'body-parser';
@@ -18,19 +18,24 @@ dotenv.config();
 
 const app = express();
 
+// ---------- VIEW ENGINE (EJS) ----------
+app.set('view engine', 'ejs');
+app.set('views', path.join(process.cwd(), 'views'));
+
 // ---------- CORS ----------
 app.use(cors({
   origin: [
     "https://waeccardsonline.vercel.app",
     "https://waeccardsonline-frontend.vercel.app",
-    "http://localhost:3000"
+    "http://localhost:3000",
+    // add any other frontends you use
   ],
-  methods: "GET,POST,PUT,DELETE,OPTIONS",
-  allowedHeaders: "Content-Type, Authorization"
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
 // -----------------------------------------------------
 
-// Capture raw body for webhook
+// Capture raw body for webhook signature verification (Paystack)
 app.use(bodyParser.json({
   verify: (req, res, buf) => { req.rawBody = buf; }
 }));
@@ -39,11 +44,9 @@ app.use(bodyParser.urlencoded({ extended: true }));
 const DB_FILE = process.env.DB_FILE || './data.db';
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || '';
 
-// ---------- ARKESEL variables ----------
-// USE DEFAULT SENDER: "Arkesel" (no approval needed)
+// ARKESEL variables (default sender)
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY || '';
-const ARKESEL_SENDER = "Arkesel";  
-// ----------------------------------------------------------
+const ARKESEL_SENDER = process.env.ARKESEL_SENDER || 'Arkesel';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'please_change_me';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
@@ -55,8 +58,13 @@ const upload = multer({ dest: path.join('uploads/') });
 let db;
 async function initDb() {
   db = await open({ filename: DB_FILE, driver: sqlite3.Database });
-  const migrations = fs.readFileSync(path.join('./migrations.sql'), 'utf8');
-  await db.exec(migrations);
+  const migrationsPath = path.join('./migrations.sql');
+  if (fs.existsSync(migrationsPath)) {
+    const migrations = fs.readFileSync(migrationsPath, 'utf8');
+    await db.exec(migrations);
+  } else {
+    console.warn('migrations.sql not found — ensure DB schema is created.');
+  }
 
   const admin = await db.get('SELECT * FROM admin LIMIT 1');
   if (!admin) {
@@ -77,33 +85,40 @@ async function initDb() {
 function ensureAdmin(req, res, next) {
   const h = req.headers.authorization;
   if (!h) return res.status(401).json({ message: 'Missing auth' });
-  const token = h.split(' ')[1];
+  const parts = h.split(' ');
+  if (parts.length < 2) return res.status(401).json({ message: 'Bad auth' });
+  const token = parts[1];
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    if (payload.role === 'admin') return next();
+    if (payload && payload.role === 'admin') return next();
     return res.status(403).json({ message: 'Forbidden' });
   } catch (e) {
     return res.status(401).json({ message: 'Invalid token' });
   }
 }
 
-// serve static
+// serve static (admin + frontend)
 app.use('/admin', express.static(path.join(process.cwd(), 'admin'), { extensions: ['html'] }));
 app.use('/', express.static(path.join(process.cwd(), 'frontend'), { extensions: ['html'] }));
 
 // ------------------ ADMIN LOGIN ------------------
 app.post('/admin/api/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ message: 'username+password required' });
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ message: 'username+password required' });
 
-  const row = await db.get('SELECT * FROM admin WHERE username = ?', [username]);
-  if (!row) return res.status(401).json({ message: 'Invalid credentials' });
+    const row = await db.get('SELECT * FROM admin WHERE username = ?', [username]);
+    if (!row) return res.status(401).json({ message: 'Invalid credentials' });
 
-  const ok = await bcrypt.compare(password, row.password_hash);
-  if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
+    const ok = await bcrypt.compare(password, row.password_hash);
+    if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
 
-  const token = jwt.sign({ role: 'admin', user: username }, JWT_SECRET, { expiresIn: '8h' });
-  res.json({ token });
+    const token = jwt.sign({ role: 'admin', user: username }, JWT_SECRET, { expiresIn: '8h' });
+    res.json({ token });
+  } catch (err) {
+    console.error('admin login error', err);
+    res.status(500).json({ message: 'server error' });
+  }
 });
 
 // ------------------ ADD SINGLE VOUCHER ------------------
@@ -115,7 +130,8 @@ app.post('/admin/api/vouchers', ensureAdmin, async (req, res) => {
       [serial.trim(), pin.trim(), 'unused']);
     res.json({ success: true });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) return res.status(400).json({ message: 'duplicate serial' });
+    if (err.message && err.message.includes('UNIQUE')) return res.status(400).json({ message: 'duplicate serial' });
+    console.error('add voucher error', err);
     res.status(500).json({ message: 'db error' });
   }
 });
@@ -123,16 +139,16 @@ app.post('/admin/api/vouchers', ensureAdmin, async (req, res) => {
 // ------------------ BULK UPLOAD ------------------
 app.post('/admin/api/vouchers/bulk', ensureAdmin, upload.single('file'), async (req, res) => {
   let content;
-  if (req.file) {
-    content = fs.readFileSync(req.file.path, 'utf8');
-    fs.unlinkSync(req.file.path);
-  } else if (req.body.data) {
-    content = req.body.data;
-  } else {
-    return res.status(400).json({ message: 'no file or data' });
-  }
-
   try {
+    if (req.file) {
+      content = fs.readFileSync(req.file.path, 'utf8');
+      fs.unlinkSync(req.file.path);
+    } else if (req.body.data) {
+      content = req.body.data;
+    } else {
+      return res.status(400).json({ message: 'no file or data' });
+    }
+
     const records = parse(content, { skip_empty_lines: true, trim: true });
     const insertStmt = await db.prepare('INSERT OR IGNORE INTO vouchers (serial,pin,status) VALUES (?,?,?)');
     let inserted = 0;
@@ -146,11 +162,12 @@ app.post('/admin/api/vouchers/bulk', ensureAdmin, upload.single('file'), async (
       }
       if (!serial) continue;
       const info = await insertStmt.run(serial, pin, 'unused');
-      if (info.changes) inserted += 1;
+      if (info && info.changes) inserted += 1;
     }
     await insertStmt.finalize();
     res.json({ success: true, inserted });
   } catch (err) {
+    console.error('bulk upload error', err);
     res.status(500).json({ message: 'import failed' });
   }
 });
@@ -183,6 +200,7 @@ app.get('/admin/api/vouchers', ensureAdmin, async (req, res) => {
     );
     res.json({ total: totalRow.count, page, per_page: limit, vouchers: rows });
   } catch (err) {
+    console.error('list vouchers error', err);
     res.status(500).json({ message: 'db error' });
   }
 });
@@ -199,6 +217,7 @@ app.post('/admin/api/vouchers/:id/mark-used', ensureAdmin, async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) {
+    console.error('mark-used error', err);
     res.status(500).json({ message: 'update failed' });
   }
 });
@@ -210,6 +229,7 @@ app.delete('/admin/api/vouchers/:id', ensureAdmin, async (req, res) => {
     await db.run('DELETE FROM vouchers WHERE id=?', [id]);
     res.json({ success: true });
   } catch (err) {
+    console.error('delete voucher error', err);
     res.status(500).json({ message: 'delete failed' });
   }
 });
@@ -223,6 +243,7 @@ app.get('/admin/api/stats', ensureAdmin, async (req, res) => {
     const today = (await db.get("SELECT COUNT(*) AS c FROM sales WHERE date(timestamp)=date('now')")).c;
     res.json({ total, unused, used, today });
   } catch (err) {
+    console.error('stats error', err);
     res.status(500).json({ message: 'stats failed' });
   }
 });
@@ -265,6 +286,7 @@ app.post('/admin/api/resend-sms', ensureAdmin, async (req, res) => {
     }
 
   } catch (err) {
+    console.error('resend-sms error', err);
     res.status(500).json({ message: 'resend failed' });
   }
 });
@@ -337,12 +359,47 @@ app.post('/verify-payment', async (req, res) => {
       }
     }
 
-    return res.json({ success: true, voucher: row.serial + ' | ' + row.pin });
+    // Return structured result (useful for frontend)
+    return res.json({
+      success: true,
+      id: row.id,
+      serial: row.serial,
+      pin: row.pin,
+      voucher: `${row.serial} | ${row.pin}`
+    });
 
   } catch (err) {
     console.error('verify-payment error', err?.response?.data || err.message || err);
+    try { await db.run('ROLLBACK'); } catch(e){/* ignore */ }
     return res.status(500).json({ success: false, message: 'Server error' });
   }
+});
+
+// ------------------ SUCCESS PAGE (rendered) ------------------
+// Renders views/success.ejs with voucher param (either voucher string or serial+pin)
+app.get('/success', async (req, res) => {
+  // Accept either: ?voucher=SERIAL|PIN  or ?serial=...&pin=...
+  const voucherParam = req.query.voucher || '';
+  let serial = req.query.serial || '';
+  let pin = req.query.pin || '';
+
+  if (!serial && !pin && voucherParam) {
+    // try split by common separators
+    const parts = voucherParam.split(/\||-|:/).map(s=>s.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      serial = parts[0];
+      pin = parts[1];
+    } else {
+      // fallback: show voucherParam as single string
+      return res.render('success', { voucher: voucherParam });
+    }
+  }
+
+  if (serial && pin) {
+    return res.render('success', { voucher: `${serial} | ${pin}` });
+  }
+
+  return res.status(400).send('Missing voucher');
 });
 
 // ------------------ PAYSTACK WEBHOOK ------------------
@@ -351,8 +408,9 @@ app.post('/pay/webhook', async (req, res) => {
     if (PAYSTACK_SECRET_KEY) {
       const raw = req.rawBody || Buffer.from(JSON.stringify(req.body));
       const hash = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY).update(raw).digest('hex');
-      const sig = req.headers['x-paystack-signature'] || req.headers['X-Paystack-Signature'];
+      const sig = (req.headers['x-paystack-signature'] || req.headers['X-Paystack-Signature'] || '').toString();
       if (!sig || hash !== sig) {
+        console.warn('Invalid Paystack signature', { expected: hash, got: sig });
         return res.status(401).send('Invalid signature');
       }
     }
@@ -374,6 +432,7 @@ app.post('/pay/webhook', async (req, res) => {
 
     if (!row) {
       await db.run('ROLLBACK');
+      console.error('out of vouchers');
       return res.status(500).send('out of vouchers');
     }
 
@@ -381,7 +440,7 @@ app.post('/pay/webhook', async (req, res) => {
 
     await db.run(
       'UPDATE vouchers SET status=?, date_used=?, buyer=? WHERE id=?',
-      ['used', now, phone || email, row.id]
+      ['used', now, phone || email || '', row.id]
     );
 
     await db.run(
@@ -413,6 +472,7 @@ app.post('/pay/webhook', async (req, res) => {
 
   } catch (err) {
     console.error('webhook error', err);
+    try { await db.run('ROLLBACK'); } catch(e){/*ignore*/ }
     return res.status(500).send('server error');
   }
 });

@@ -1,4 +1,11 @@
 // server.js — corrected and Express/EJS-ready
+import pg from "pg";
+const { Pool } = pg;
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
 import express from 'express';
 import dotenv from 'dotenv';
 import bodyParser from 'body-parser';

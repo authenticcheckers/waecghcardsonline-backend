@@ -1,4 +1,4 @@
-// server.js (final)
+// server.js (fixed)
 import pg from "pg";
 import express from 'express';
 import dotenv from 'dotenv';
@@ -39,7 +39,7 @@ app.use(bodyParser.json({
 }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || "";
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || process.env.PAYSTACK_SECRET_KEY || "";
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY || "";
 const ARKESEL_SENDER = process.env.ARKESEL_SENDER || "Arkesel";
 const JWT_SECRET = process.env.JWT_SECRET || "please_change_me";
@@ -78,7 +78,8 @@ app.post('/admin/api/vouchers', requireAuth, async (req, res) => {
   const { serial, pin } = req.body;
   if(!serial || !pin) return res.status(400).json({message:'serial & pin required'});
   try {
-    await query("INSERT INTO vouchers (serial,pin,status) VALUES ($1,$2,'unused')", [serial.trim(), pin.trim()]);
+    // Insert with used default false; ON CONFLICT avoid duplicates if constraint exists
+    await query("INSERT INTO vouchers (serial,pin,used) VALUES ($1,$2,false) ON CONFLICT (serial) DO NOTHING", [serial.trim(), pin.trim()]);
     res.json({success:true});
   } catch (err) {
     if(err.detail && err.detail.includes('already exists')) return res.status(400).json({message:'duplicate serial'});
@@ -100,9 +101,9 @@ app.post('/admin/api/vouchers/bulk', requireAuth, upload.single('file'), async (
       const pin = (r[1]||'').toString().trim();
       if(!serial || !pin) continue;
       try {
-        await query("INSERT INTO vouchers (serial,pin) VALUES ($1,$2) ON CONFLICT DO NOTHING", [serial, pin]);
+        await query("INSERT INTO vouchers (serial,pin,used) VALUES ($1,$2,false) ON CONFLICT (serial) DO NOTHING", [serial, pin]);
         inserted++;
-      } catch(e){}
+      } catch(e){ console.error('bulk row error', e); }
     }
     res.json({success:true, inserted});
   } catch(err){
@@ -121,9 +122,13 @@ app.get('/admin/api/vouchers', requireAuth, async (req, res) => {
     const offset = (page-1)*limit;
 
     let where = 'WHERE 1=1'; const params = [];
-    if(status === 'unused'){ where += " AND status='unused'"; }
-    if(status === 'used'){ where += " AND status='used'"; }
-    if(search){ params.push(`%${search}%`); where += ` AND (serial ILIKE $${params.length} OR pin ILIKE $${params.length})`; }
+    if(status === 'unused'){ where += " AND used = false"; }
+    if(status === 'used'){ where += " AND used = true"; }
+    if(search){
+      params.push(`%${search}%`);
+      // use the same param for both serial and pin checks
+      where += ` AND (serial ILIKE $${params.length} OR pin ILIKE $${params.length})`;
+    }
 
     const totalRes = await query(`SELECT COUNT(*) FROM vouchers ${where}`, params);
     const rowsRes = await query(`SELECT * FROM vouchers ${where} ORDER BY id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`, [...params, limit, offset]);
@@ -174,7 +179,7 @@ app.get("/verify-payment", async (req, res) => {
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
         headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET}`,
+          Authorization: `Bearer ${PAYSTACK_SECRET}`,
           "Content-Type": "application/json",
         },
       }
@@ -187,7 +192,11 @@ app.get("/verify-payment", async (req, res) => {
     }
 
     const amount = result.data.amount / 100;
-    const customerEmail = result.data.customer.email;
+    const customerEmail = result.data.customer?.email || "";
+    const customerFirst = result.data.customer?.first_name || "";
+    const customerLast = result.data.customer?.last_name || "";
+    // phone might not be provided by Paystack; you can pass phone via query if you collect earlier
+    const phone = req.query.phone || ""; 
 
     // -----------------------------------------
     // 1. Generate voucher
@@ -211,8 +220,8 @@ app.get("/verify-payment", async (req, res) => {
       `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, date)
        VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [
-        result.data.customer.first_name + " " + result.data.customer.last_name || "",
-        "", // no phone provided by Paystack, unless you collected it earlier
+        (customerFirst + " " + customerLast).trim(),
+        phone,
         customerEmail,
         serial,
         pin,
@@ -221,33 +230,48 @@ app.get("/verify-payment", async (req, res) => {
     );
 
     // -----------------------------------------
-    // 4. Return voucher to user
+    // 4. Send SMS (if phone available) and return voucher
     // -----------------------------------------
+    if (phone && ARKESEL_API_KEY) {
+      try {
+        await axios.post(
+          'https://sms.arkesel.com/api/v2/sms/send',
+          {
+            recipients: [phone],
+            sender: ARKESEL_SENDER,
+            message: `Your WASSCE voucher:\nSerial: ${serial}\nPIN: ${pin}`
+          },
+          { headers: { 'api-key': ARKESEL_API_KEY } }
+        );
+      } catch (e) {
+        try {
+          const fallback = `https://sms.arkesel.com/sms/api?action=send-sms&api_key=${encodeURIComponent(
+            ARKESEL_API_KEY
+          )}&to=${encodeURIComponent(phone)}&from=${encodeURIComponent(
+            ARKESEL_SENDER
+          )}&sms=${encodeURIComponent(
+            `Your WASSCE voucher: Serial:${serial} PIN:${pin}`
+          )}`;
+          await axios.get(fallback);
+        } catch (e2) {
+          console.error('sms fallback error', e2 || e);
+        }
+      }
+    }
+
     return res.json({
       success: true,
       serial,
-      pin
+      pin,
+      voucher: `${serial} | ${pin}`
     });
 
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Server error" });
+    console.error('verify-payment error', error?.response?.data || error.message || error);
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
-      // send SMS
-      if(phone && ARKESEL_API_KEY){
-        try {
-          await axios.post('https://sms.arkesel.com/api/v2/sms/send', { recipients:[phone], sender:ARKESEL_SENDER, message:`Your WASSCE voucher:\nSerial: ${v.serial}\nPIN: ${v.pin}` }, { headers:{ 'api-key': ARKESEL_API_KEY }});
-        } catch (e){
-          try {
-            const fallback = `https://sms.arkesel.com/sms/api?action=send-sms&api_key=${encodeURIComponent(ARKESEL_API_KEY)}&to=${encodeURIComponent(phone)}&from=${encodeURIComponent(ARKESEL_SENDER)}&sms=${encodeURIComponent(`Your WASSCE voucher: Serial:${v.serial} PIN:${v.pin}`)}`;
-            await axios.get(fallback);
-          } catch(e2){}
-        }
-      }
-
-     
 // ====== Success page (rendered EJS) ======
 app.get('/success', (req,res) => {
   const serial = req.query.serial;
@@ -263,17 +287,19 @@ if(process.env.ENABLE_DEV_ASSIGN === 'true'){
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const vres = await client.query("SELECT id,serial,pin FROM vouchers WHERE status='unused' ORDER BY id ASC LIMIT 1 FOR UPDATE");
+      // pick one unused voucher
+      const vres = await client.query("SELECT id,serial,pin FROM vouchers WHERE used = false ORDER BY id ASC LIMIT 1 FOR UPDATE");
       if(vres.rows.length === 0){ await client.query('ROLLBACK'); client.release(); return res.status(500).json({error:'out of vouchers'}); }
       const v = vres.rows[0];
-      const now = new Date();
-      await client.query("UPDATE vouchers SET status='used', date_used=$1, buyer=$2 WHERE id=$3", [now, phone, v.id]);
-      await client.query("INSERT INTO sales (phone,email,voucher_serial,voucher_pin,reference,amount) VALUES ($1,$2,$3,$4,$5,$6)", [phone,null,v.serial,v.pin,'dev',0]);
+      // mark used = true
+      await client.query("UPDATE vouchers SET used = true WHERE id=$1", [v.id]);
+      // insert into sales
+      await client.query("INSERT INTO sales (phone,email,voucher_serial,voucher_pin,reference,amount,date) VALUES ($1,$2,$3,$4,$5,$6,NOW())", [phone,null,v.serial,v.pin,'dev',0]);
       await client.query('COMMIT');
       client.release();
       res.json({ success:true, serial:v.serial, pin:v.pin });
     } catch(e){
-      await client.query('ROLLBACK'); client.release(); res.status(500).json({error:'db error'});
+      await client.query('ROLLBACK'); client.release(); console.error('dev assign error', e); res.status(500).json({error:'db error'});
     }
   });
 }

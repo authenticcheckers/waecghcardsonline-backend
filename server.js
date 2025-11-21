@@ -202,6 +202,13 @@ app.get("/admin/api/vouchers", requireAuth, async (req, res) => {
 });
 
 // ------------------ Payment Verification ------------------
+app.use((req, res, next) => {
+  console.log("Incoming:", req.method, req.url);
+  console.log("Headers:", req.headers);
+  console.log("Body:", req.body);
+  next();
+});
+
 async function handleVerifyPayment(req, res) {
   try {
     const reference =

@@ -35,8 +35,9 @@ app.use(
   })
 );
 
-app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.json({ limit: "10mb", type: "*/*" }));
+app.use(express.urlencoded({ extended: true }));
+
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || process.env.PAYSTACK_SECRET_KEY || "";
 const JWT_SECRET = process.env.JWT_SECRET || "change_this";

@@ -1,152 +1,55 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voucher Retrieved Successfully</title>
-
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f5f5f5;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-        }
-
-        .container {
-            background: #fff;
-            width: 95%;
-            max-width: 480px;
-            padding: 25px;
-            border-radius: 14px;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-
-        h2 {
-            margin-bottom: 10px;
-            color: #1a1a1a;
-        }
-
-        .success-box {
-            background: #eafce8;
-            border-left: 5px solid #29a329;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            color: #1b5e20;
-        }
-
-        .voucher-box {
-            background: #fafafa;
-            border: 1px solid #dcdcdc;
-            border-radius: 10px;
-            padding: 18px;
-            margin-top: 10px;
-            font-size: 18px;
-            font-weight: bold;
-            letter-spacing: 1px;
-            word-break: break-all;
-        }
-
-        button {
-            width: 100%;
-            margin-top: 12px;
-            padding: 12px;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-
-        .copy-btn {
-            background: #007bff;
-            color: white;
-        }
-
-        .copy-btn:hover {
-            background: #0066d1;
-        }
-
-        .pdf-btn {
-            background: #ff9800;
-            color: white;
-        }
-
-        .pdf-btn:hover {
-            background: #e68900;
-        }
-
-        .footer {
-            margin-top: 25px;
-            font-size: 14px;
-            color: #555;
-        }
-
-    </style>
-
-    <!-- jsPDF for PDF Download -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Voucher — waecghcardsonline</title>
+  <style>
+    body{ font-family: system-ui, -apple-system, Arial; background:#f6f8fb; color:#0b1a2b; padding:24px; }
+    .card{ max-width:720px; margin:0 auto; background:#fff; border-radius:10px; padding:20px; box-shadow:0 8px 30px rgba(11,26,43,0.07); }
+    h1{ margin:0 0 8px 0; font-size:20px; }
+    pre{ background:#f4f6fb; padding:12px; border-radius:6px; overflow:auto; }
+    .meta{ margin-top:12px; color:#556; font-size:14px; }
+    .actions{ margin-top:18px; display:flex; gap:8px; }
+    button{ padding:10px 14px; border-radius:8px; border:0; cursor:pointer; font-weight:600; }
+    .btn-primary{ background:#1f7aef; color:#fff; }
+    .btn-ghost{ background:transparent; border:1px solid #dfe8fb; }
+    .signature{ margin-top:18px; }
+    img.signature-img{ max-width:180px; display:block; }
+  </style>
 </head>
-
 <body>
+  <div class="card" role="main">
+    <h1>Your WASSCE Voucher</h1>
+    <p>Below is your voucher. Save or print it now — you can also download it as PDF via Print &rarr; Save as PDF.</p>
+    <pre id="voucherText"><%= voucher %></pre>
 
-<div class="container">
-    <h2>Payment Successful 🎉</h2>
-
-    <div class="success-box">
-        Your WASSCE result checker voucher has been generated.
+    <div class="meta">
+      <div>Serial: <strong><%= serial || '' %></strong></div>
+      <div>PIN: <strong><%= pin || '' %></strong></div>
     </div>
 
-    <div class="voucher-box" id="voucherBox">
-        <%= voucher %>
+    <div class="signature">
+      <% if (signaturePath) { %>
+        <div>Authorized by:</div>
+        <img class="signature-img" src="<%= signaturePath %>" alt="signature"/>
+      <% } %>
     </div>
 
-    <button class="copy-btn" onclick="copyVoucher()">Copy Voucher</button>
-    <button class="pdf-btn" onclick="downloadPDF()">Download as PDF</button>
-
-    <div class="footer">
-        Thank you for using <strong>Authentic Checkers</strong>.
+    <div class="actions">
+      <button class="btn-primary" id="printBtn">Print / Save PDF</button>
+      <button class="btn-ghost" id="copyBtn">Copy to clipboard</button>
     </div>
-</div>
+  </div>
 
-<script>
-    function copyVoucher() {
-        const code = document.getElementById("voucherBox").innerText;
-        navigator.clipboard.writeText(code).then(() => {
-            alert("Voucher copied!");
-        });
-    }
-
-    function downloadPDF() {
-        const { jsPDF } = window.jspdf;
-        const doc = new jsPDF();
-
-        const voucher = document.getElementById("voucherBox").innerText;
-
-        doc.setFontSize(18);
-        doc.text("Authentic Checkers", 10, 20);
-
-        doc.setFontSize(14);
-        doc.text("WASSCE Results Checker Voucher", 10, 35);
-
-        doc.setFontSize(12);
-        doc.text("Voucher Code:", 10, 55);
-
-        doc.setFontSize(20);
-        doc.text(voucher, 10, 70);
-
-        doc.setFontSize(10);
-        doc.text("Thank you for your purchase!", 10, 95);
-
-        doc.save("WASSCE_Voucher.pdf");
-    }
-</script>
-
+  <script>
+    document.getElementById('printBtn').addEventListener('click', ()=> window.print());
+    document.getElementById('copyBtn').addEventListener('click', async ()=>{
+      try {
+        await navigator.clipboard.writeText(document.getElementById('voucherText').innerText);
+        alert('Voucher copied to clipboard');
+      } catch(e) { alert('Copy failed'); }
+    });
+  </script>
 </body>
 </html>

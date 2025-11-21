@@ -1,4 +1,4 @@
-// server.js — FINAL WITH BECE + WASSCE SUPPORT (fixed name issue)
+// server.js — FINAL STABLE VERSION
 import pg from "pg";
 import express from "express";
 import dotenv from "dotenv";
@@ -45,6 +45,7 @@ const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "";
 
 const upload = multer({ dest: "uploads/" });
 
+// ------------------ AUTH MIDDLEWARE ------------------
 function requireAuth(req, res, next) {
   try {
     const h = req.headers.authorization;
@@ -63,6 +64,7 @@ function requireAuth(req, res, next) {
 app.post("/admin/api/login", async (req, res) => {
   try {
     const { username, password } = req.body;
+
     if (!username || !password)
       return res.status(400).json({ message: "username+password required" });
 
@@ -72,7 +74,9 @@ app.post("/admin/api/login", async (req, res) => {
     const ok = await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
-    const token = jwt.sign({ role: "admin", user: username }, JWT_SECRET, { expiresIn: "8h" });
+    const token = jwt.sign({ role: "admin", user: username }, JWT_SECRET, {
+      expiresIn: "8h"
+    });
 
     res.json({ token });
   } catch (err) {
@@ -81,7 +85,7 @@ app.post("/admin/api/login", async (req, res) => {
   }
 });
 
-// ------------------ Admin: add voucher ------------------
+// ------------------ Admin: Add Voucher ------------------
 app.post("/admin/api/vouchers", requireAuth, async (req, res) => {
   try {
     const { serial, pin, type } = req.body;
@@ -103,47 +107,54 @@ app.post("/admin/api/vouchers", requireAuth, async (req, res) => {
   }
 });
 
-// ------------------ Admin: bulk upload ------------------
-app.post("/admin/api/vouchers/bulk", requireAuth, upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file)
-      return res.status(400).json({ message: "No file uploaded" });
+// ------------------ Admin: Bulk Upload ------------------
+app.post(
+  "/admin/api/vouchers/bulk",
+  requireAuth,
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file)
+        return res.status(400).json({ message: "No file uploaded" });
 
-    const csv = fs.readFileSync(req.file.path, "utf8");
-    fs.unlinkSync(req.file.path);
+      const csv = fs.readFileSync(req.file.path, "utf8");
+      fs.unlinkSync(req.file.path);
 
-    const rows = parse(csv, { trim: true, skip_empty_lines: true });
-    let inserted = 0;
+      const rows = parse(csv, { trim: true, skip_empty_lines: true });
+      let inserted = 0;
 
-    for (const r of rows) {
-      const serial = r[0]?.toString().trim();
-      const pin = r[1]?.toString().trim();
-      const typeCSV = (r[2]?.toString().trim() || "WASSCE").toUpperCase();
-      const type = ["WASSCE", "BECE"].includes(typeCSV) ? typeCSV : "WASSCE";
+      for (const r of rows) {
+        const serial = r[0]?.toString().trim();
+        const pin = r[1]?.toString().trim();
+        const typeCSV = (r[2]?.toString().trim() || "WASSCE").toUpperCase();
+        const type = ["WASSCE", "BECE"].includes(typeCSV)
+          ? typeCSV
+          : "WASSCE";
 
-      if (!serial || !pin) continue;
+        if (!serial || !pin) continue;
 
-      try {
-        const resIns = await pool.query(
-          `INSERT INTO vouchers (serial, pin, used, type)
-           VALUES ($1,$2,false,$3)
-           ON CONFLICT (serial) DO NOTHING`,
-          [serial, pin, type]
-        );
-        if (resIns.rowCount && resIns.rowCount > 0) inserted++;
-      } catch (e) {
-        console.error('bulk row error', e?.message || e);
+        try {
+          const resIns = await pool.query(
+            `INSERT INTO vouchers (serial, pin, used, type)
+             VALUES ($1,$2,false,$3)
+             ON CONFLICT (serial) DO NOTHING`,
+            [serial, pin, type]
+          );
+          if (resIns.rowCount && resIns.rowCount > 0) inserted++;
+        } catch (e) {
+          console.error("bulk row error", e?.message || e);
+        }
       }
+
+      res.json({ success: true, inserted });
+    } catch (err) {
+      console.error("bulk import error", err);
+      res.status(500).json({ message: "import failed" });
     }
-
-    res.json({ success: true, inserted });
-  } catch (err) {
-    console.error("bulk import error", err);
-    res.status(500).json({ message: "import failed" });
   }
-});
+);
 
-// ------------------ Admin: list vouchers ------------------
+// ------------------ Admin: List Vouchers ------------------
 app.get("/admin/api/vouchers", requireAuth, async (req, res) => {
   try {
     const search = (req.query.search || "").toString();
@@ -165,7 +176,10 @@ app.get("/admin/api/vouchers", requireAuth, async (req, res) => {
       where += ` AND type = $${params.length}`;
     }
 
-    const totalRes = await pool.query(`SELECT COUNT(*) FROM vouchers ${where}`, params);
+    const totalRes = await pool.query(
+      `SELECT COUNT(*) FROM vouchers ${where}`,
+      params
+    );
 
     params.push(limit, offset);
 
@@ -186,7 +200,7 @@ app.get("/admin/api/vouchers", requireAuth, async (req, res) => {
   }
 });
 
-// ------------------ VERIFY PAYMENT ------------------
+// ------------------ Payment Verification ------------------
 async function handleVerifyPayment(req, res) {
   try {
     const reference =
@@ -202,7 +216,9 @@ async function handleVerifyPayment(req, res) {
       String(rawType).toUpperCase() === "BECE" ? "BECE" : "WASSCE";
 
     const verify = await axios.get(
-      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+      `https://api.paystack.co/transaction/verify/${encodeURIComponent(
+        reference
+      )}`,
       { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
     );
 
@@ -213,27 +229,25 @@ async function handleVerifyPayment(req, res) {
     }
 
     const customer = result.data?.customer || {};
-    let name = "";
-
     const first = customer.first_name || "";
     const last = customer.last_name || "";
 
-    if (first || last) {
-      name = `${first} ${last}`.trim();
-    }
+    let name = (first || last ? `${first} ${last}` : "").trim();
 
-    // ******** FIX APPLIED HERE ********
+    // FIXED FALLBACK
     if (!name || name.length < 2) {
-      name = req.method === "POST"
-        ? (req.body.name || "")
-        : (req.query.name || "");
+      name =
+        req.method === "POST"
+          ? req.body.name || ""
+          : req.query.name || "";
     }
 
     const phone =
-      req.method === "POST" ? (req.body.phone || "") : (req.query.phone || "");
+      req.method === "POST" ? req.body.phone || "" : req.query.phone || "";
 
     const email = customer.email || "";
 
+    // Get unused voucher
     const v = await pool.query(
       `SELECT id, serial, pin FROM vouchers 
        WHERE used = false AND type = $1
@@ -243,21 +257,30 @@ async function handleVerifyPayment(req, res) {
     );
 
     if (v.rows.length === 0) {
-      return res.status(500).json({ error: `${purchaseType} vouchers are sold out.` });
+      return res
+        .status(500)
+        .json({ error: `${purchaseType} vouchers are sold out.` });
     }
 
     const voucher = v.rows[0];
 
-    await pool.query(
-      "UPDATE vouchers SET used = true WHERE id = $1",
-      [voucher.id]
-    );
+    await pool.query("UPDATE vouchers SET used = true WHERE id = $1", [
+      voucher.id
+    ]);
 
     try {
       await pool.query(
         `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
          VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-        [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
+        [
+          name,
+          phone,
+          email,
+          voucher.serial,
+          voucher.pin,
+          reference,
+          purchaseType
+        ]
       );
     } catch (e) {
       if (e && /column .* type .* does not exist/i.test(String(e))) {
@@ -278,9 +301,11 @@ async function handleVerifyPayment(req, res) {
       pin: voucher.pin,
       voucher: `${voucher.serial} | ${voucher.pin}`
     });
-
   } catch (err) {
-    console.error("verify-payment error", err?.response?.data || err?.message || err);
+    console.error(
+      "verify-payment error",
+      err?.response?.data || err?.message || err
+    );
     return res.status(500).json({ error: "Server error" });
   }
 }
@@ -290,5 +315,6 @@ app.post("/verify-payment", handleVerifyPayment);
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
+// ------------------ START SERVER ------------------
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on ${port}`));

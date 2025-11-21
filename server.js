@@ -162,28 +162,78 @@ app.post('/admin/api/resend-sms', requireAuth, async (req,res) => {
 });
 
 // ====== Verify payment and assign voucher ======
-app.post('/verify-payment', async (req,res) => {
-  const { reference, name, phone, email } = req.body;
-  if(!reference) return res.status(400).json({success:false, message:'Missing reference'});
-
+app.get("/verify-payment", async (req, res) => {
   try {
-    if(!PAYSTACK_SECRET_KEY) return res.status(500).json({success:false, message:'Paystack not configured'});
-    const verifyResp = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } });
-    if(!verifyResp.data || !verifyResp.data.data || verifyResp.data.status !== true) return res.status(400).json({success:false, message:'Paystack verification failed'});
-    if(verifyResp.data.data.status !== 'success') return res.status(400).json({success:false, message:'Payment not successful'});
-    const amount = (verifyResp.data.data.amount || 0) / 100;
+    const reference = req.query.reference;
+    if (!reference) {
+      return res.status(400).json({ error: "Missing reference" });
+    }
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const vres = await client.query("SELECT id,serial,pin FROM vouchers WHERE status='unused' ORDER BY id ASC LIMIT 1 FOR UPDATE");
-      if(vres.rows.length === 0){ await client.query('ROLLBACK'); client.release(); return res.status(500).json({success:false, message:'Out of vouchers'}); }
-      const v = vres.rows[0];
-      const now = new Date();
-      await client.query("UPDATE vouchers SET status='used', date_used=$1, buyer=$2 WHERE id=$3", [now, phone || email || '', v.id]);
-      await client.query("INSERT INTO sales (name,phone,email,voucher_serial,voucher_pin,reference,amount) VALUES ($1,$2,$3,$4,$5,$6,$7)", [name,phone,email,v.serial,v.pin,reference,amount]);
-      await client.query('COMMIT');
-      client.release();
+    // Verify payment from Paystack
+    const verify = await fetch(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const result = await verify.json();
+
+    if (!result.status || result.data.status !== "success") {
+      return res.status(400).json({ error: "Payment not successful" });
+    }
+
+    const amount = result.data.amount / 100;
+    const customerEmail = result.data.customer.email;
+
+    // -----------------------------------------
+    // 1. Generate voucher
+    // -----------------------------------------
+    const serial = "WAC" + Math.random().toString().slice(2, 10);
+    const pin = Math.random().toString().slice(2, 8);
+
+    // -----------------------------------------
+    // 2. Insert into vouchers table
+    // -----------------------------------------
+    await pool.query(
+      `INSERT INTO vouchers (serial, pin, used)
+       VALUES ($1, $2, false)`,
+      [serial, pin]
+    );
+
+    // -----------------------------------------
+    // 3. Insert into sales table
+    // -----------------------------------------
+    await pool.query(
+      `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, date)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [
+        result.data.customer.first_name + " " + result.data.customer.last_name || "",
+        "", // no phone provided by Paystack, unless you collected it earlier
+        customerEmail,
+        serial,
+        pin,
+        reference
+      ]
+    );
+
+    // -----------------------------------------
+    // 4. Return voucher to user
+    // -----------------------------------------
+    return res.json({
+      success: true,
+      serial,
+      pin
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
       // send SMS
       if(phone && ARKESEL_API_KEY){

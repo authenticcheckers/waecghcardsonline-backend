@@ -247,18 +247,7 @@ app.get("/verify-payment", async (req, res) => {
         }
       }
 
-      return res.json({ success:true, serial: v.serial, pin: v.pin, voucher:`${v.serial} | ${v.pin}` });
-
-    } catch(e){
-      await client.query('ROLLBACK'); client.release(); throw e;
-    }
-
-  } catch(err){
-    console.error('verify-payment error', err?.response?.data || err.message || err);
-    return res.status(500).json({ success:false, message:'Server error' });
-  }
-});
-
+     
 // ====== Success page (rendered EJS) ======
 app.get('/success', (req,res) => {
   const serial = req.query.serial;

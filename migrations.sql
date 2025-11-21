@@ -1,27 +1,30 @@
--- vouchers table
-CREATE TABLE IF NOT EXISTS vouchers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  serial TEXT NOT NULL UNIQUE,
-  pin TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'unused',
-  date_used TEXT,
-  buyer TEXT
+-- migrations.sql — Postgres schema for waecghcardsonline
+CREATE TABLE IF NOT EXISTS admin (
+  id SERIAL PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
--- sales table
+CREATE TABLE IF NOT EXISTS vouchers (
+  id SERIAL PRIMARY KEY,
+  serial TEXT UNIQUE NOT NULL,
+  pin TEXT,
+  status TEXT NOT NULL DEFAULT 'unused',
+  date_used TIMESTAMP WITH TIME ZONE,
+  buyer TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sales (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   phone TEXT,
   email TEXT,
   voucher_serial TEXT,
-  amount REAL,
-  timestamp TEXT,
+  amount NUMERIC(10,2),
+  timestamp TIMESTAMP WITH TIME ZONE DEFAULT now(),
   paystack_ref TEXT
 );
 
--- admin table
-CREATE TABLE IF NOT EXISTS admin (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL
-);
+-- Index for fast search
+CREATE INDEX IF NOT EXISTS idx_vouchers_serial ON vouchers (serial);

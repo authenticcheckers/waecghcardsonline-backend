@@ -20,24 +20,28 @@ const pool = new Pool({
 // EXPRESS SETUP
 ////////////////////////////////////
 const app = express();
-app.use(express.json());
+
+// THE ONLY BODY PARSER — THIS FIXES EVERYTHING
+app.use(express.json({ limit: "2mb" }));
 
 app.use(cors({
   origin: [
     "https://waeccardsonline.vercel.app",
-    "http://localhost:5500"
+    "http://localhost:5500",
+    "http://localhost:3000"
   ],
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"]
 }));
 
 ////////////////////////////////////
-// LOGGING (DON'T REMOVE)
+// DEBUG LOGGER (DO NOT REMOVE)
 ////////////////////////////////////
 app.use((req, res, next) => {
-  console.log("\nIncoming:", req.method, req.url);
-  console.log("Headers:", req.headers);
-  console.log("Body:", req.body);
+  console.log("\n===== NEW REQUEST =====");
+  console.log("METHOD:", req.method);
+  console.log("URL:", req.url);
+  console.log("BODY:", req.body);
   next();
 });
 
@@ -46,22 +50,21 @@ app.use((req, res, next) => {
 ////////////////////////////////////
 async function handleVerifyPayment(req, res) {
   try {
-    const reference =
-      req.method === "POST" ? req.body.reference : req.query.reference;
+    // FIX 100%: read reference safely from body or query
+    const reference = req.body?.reference || req.query?.reference;
 
     if (!reference) {
-      console.log("❌ Missing reference in request");
+      console.log("❌ Reference missing even after fallback!");
       return res.status(400).json({ error: "Missing reference" });
     }
 
-    let rawType =
-      req.method === "POST" ? req.body.type : req.query.type;
-
     const purchaseType =
-      String(rawType || "").toUpperCase() === "BECE" ? "BECE" : "WASSCE";
+      String(req.body?.type || req.query?.type || "WASSCE").toUpperCase() === "BECE"
+        ? "BECE"
+        : "WASSCE";
 
     ////////////////////////////////
-    // VERIFY WITH PAYSTACK
+    // VERIFY PAYSTACK
     ////////////////////////////////
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
@@ -74,28 +77,24 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
-    console.log("✔ Paystack verification OK");
+    console.log("✔ Paystack verification success");
 
     ////////////////////////////////
-    // CUSTOMER NAME FALLBACK
+    // EXTRACT CUSTOMER INFO
     ////////////////////////////////
-    const customer = result.data?.customer || {};
-    let name = `${customer.first_name || ""} ${customer.last_name || ""}`.trim();
+    const customer = result.data.customer || {};
 
-    if (!name || name.length < 2) {
-      name =
-        req.method === "POST"
-          ? (req.body.name || "")
-          : (req.query.name || "");
-    }
+    let name =
+      `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
+      req.body?.name ||
+      req.query?.name ||
+      "";
 
-    const phone =
-      req.method === "POST" ? (req.body.phone || "") : (req.query.phone || "");
-
-    const email = customer.email || req.body.email || "";
+    const phone = req.body?.phone || req.query?.phone || "";
+    const email = customer.email || req.body?.email || "";
 
     ////////////////////////////////
-    // GET AVAILABLE VOUCHER
+    // GET UNUSED VOUCHER
     ////////////////////////////////
     const v = await pool.query(
       `SELECT id, serial, pin 
@@ -113,7 +112,7 @@ async function handleVerifyPayment(req, res) {
     const voucher = v.rows[0];
 
     ////////////////////////////////
-    // MARK AS USED
+    // MARK VOUCHER USED
     ////////////////////////////////
     await pool.query(
       "UPDATE vouchers SET used = true WHERE id = $1",
@@ -121,26 +120,27 @@ async function handleVerifyPayment(req, res) {
     );
 
     ////////////////////////////////
-    // INSERT INTO SALES (SAFE)
+    // INSERT SALE (SAFE MODE)
     ////////////////////////////////
     try {
       await pool.query(
-        `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        `INSERT INTO sales 
+        (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
         [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
       );
     } catch (e) {
-      console.log("Sales insert error, trying fallback:", e.message);
-
+      console.log("sales insert failed → trying fallback", e.message);
       await pool.query(
-        `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, date)
-         VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+        `INSERT INTO sales 
+        (name, phone, email, voucher_serial, voucher_pin, reference, date)
+        VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
         [name, phone, email, voucher.serial, voucher.pin, reference]
       );
     }
 
     ////////////////////////////////
-    // RETURN SUCCESS PAYLOAD
+    // SUCCESS RESPONSE
     ////////////////////////////////
     return res.json({
       success: true,
@@ -152,22 +152,18 @@ async function handleVerifyPayment(req, res) {
     });
 
   } catch (err) {
-    console.error("verify-payment ERROR →", err?.response?.data || err);
+    console.log("❌ verify-payment crash:", err?.response?.data || err);
     return res.status(500).json({ error: "Server error" });
   }
 }
 
-app.get("/verify-payment", handleVerifyPayment);
 app.post("/verify-payment", handleVerifyPayment);
+app.get("/verify-payment", handleVerifyPayment);
 
-////////////////////////////////////
 // HEALTH CHECK
-////////////////////////////////////
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-////////////////////////////////////
 // START SERVER
-////////////////////////////////////
-app.listen(process.env.PORT || 3000, () => {
-  console.log("✔ Backend running on port", process.env.PORT || 3000);
-});
+app.listen(process.env.PORT || 3000, () =>
+  console.log("Backend live on", process.env.PORT || 3000)
+);

@@ -1,4 +1,4 @@
-// server.js — FINAL WITH BECE + WASSCE SUPPORT
+// server.js — FINAL WITH BECE + WASSCE SUPPORT (robustified)
 import pg from "pg";
 import express from "express";
 import dotenv from "dotenv";
@@ -54,7 +54,8 @@ function requireAuth(req, res, next) {
     const payload = jwt.verify(token, JWT_SECRET);
     if (payload.role === "admin") return next();
     return res.status(403).json({ message: "Forbidden" });
-  } catch {
+  } catch (e) {
+    console.error('auth error', e?.message || e);
     return res.status(401).json({ message: "Invalid token" });
   }
 }
@@ -89,10 +90,11 @@ app.post("/admin/api/vouchers", requireAuth, async (req, res) => {
     if (!serial || !pin)
       return res.status(400).json({ message: "serial & pin required" });
 
-    const t = type && type.toUpperCase() === "BECE" ? "BECE" : "WASSCE";
+    const t = type && String(type).toUpperCase() === "BECE" ? "BECE" : "WASSCE";
 
+    // avoid crashing on duplicate serials
     await pool.query(
-      "INSERT INTO vouchers (serial, pin, used, type) VALUES ($1,$2,false,$3)",
+      "INSERT INTO vouchers (serial, pin, used, type) VALUES ($1,$2,false,$3) ON CONFLICT (serial) DO NOTHING",
       [serial.trim(), pin.trim(), t]
     );
 
@@ -125,13 +127,18 @@ app.post("/admin/api/vouchers/bulk", requireAuth, upload.single("file"), async (
 
       if (!serial || !pin) continue;
 
-      await pool.query(
-        `INSERT INTO vouchers (serial, pin, used, type)
-         VALUES ($1,$2,false,$3)
-         ON CONFLICT (serial) DO NOTHING`,
-        [serial, pin, type]
-      );
-      inserted++;
+      try {
+        const resIns = await pool.query(
+          `INSERT INTO vouchers (serial, pin, used, type)
+           VALUES ($1,$2,false,$3)
+           ON CONFLICT (serial) DO NOTHING`,
+          [serial, pin, type]
+        );
+        // count inserted only when rowCount > 0 (i.e., insert happened)
+        if (resIns.rowCount && resIns.rowCount > 0) inserted++;
+      } catch (e) {
+        console.error('bulk row error', e?.message || e);
+      }
     }
 
     res.json({ success: true, inserted });
@@ -145,7 +152,7 @@ app.post("/admin/api/vouchers/bulk", requireAuth, upload.single("file"), async (
 app.get("/admin/api/vouchers", requireAuth, async (req, res) => {
   try {
     const search = (req.query.search || "").toString();
-    const typeFilter = (req.query.type || "").toUpperCase();
+    const typeFilter = (req.query.type || "").toString().toUpperCase();
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 50)));
     const page = Math.max(1, Number(req.query.page || 1));
     const offset = (page - 1) * limit;
@@ -193,13 +200,9 @@ async function handleVerifyPayment(req, res) {
     if (!reference)
       return res.status(400).json({ error: "Missing reference" });
 
-    // voucher type sent from frontend (default WASSCE)
-    const purchaseType =
-      (req.method === "POST" ? req.body.type : req.query.type || "WASSCE")
-        .toString()
-        .toUpperCase() === "BECE"
-        ? "BECE"
-        : "WASSCE";
+    // safely compute purchaseType so undefined doesn't throw
+    const rawType = (req.method === "POST" ? req.body.type : req.query.type) || "WASSCE";
+    const purchaseType = String(rawType).toUpperCase() === "BECE" ? "BECE" : "WASSCE";
 
     // Paystack verify
     const verify = await axios.get(
@@ -209,7 +212,7 @@ async function handleVerifyPayment(req, res) {
 
     const result = verify.data;
 
-    if (!result.status || result.data?.status !== "success") {
+    if (!result || !result.status || result.data?.status !== "success") {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
@@ -217,7 +220,7 @@ async function handleVerifyPayment(req, res) {
     const first = result.data?.customer?.first_name || "";
     const last = result.data?.customer?.last_name || "";
     const name = `${first} ${last}`.trim();
-    const phone = req.body?.phone || req.query?.phone || "";
+    const phone = (req.method === "POST" ? req.body.phone : req.query.phone) || "";
 
     // ----------- Fetch a real unused voucher from DB by type -----------
     const v = await pool.query(
@@ -240,22 +243,40 @@ async function handleVerifyPayment(req, res) {
       [voucher.id]
     );
 
-    // Record sale
-    await pool.query(
-      `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-      [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
-    );
+    // Record sale (sales table must have a 'type' column; otherwise remove type)
+    try {
+      await pool.query(
+        `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
+      );
+    } catch (e) {
+      // If sales table doesn't have 'type', fallback to inserting without it
+      if (e && /column .* type .* does not exist/i.test(String(e))) {
+        try {
+          await pool.query(
+            `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, date)
+             VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+            [name, phone, email, voucher.serial, voucher.pin, reference]
+          );
+        } catch (e2) {
+          console.error('failed inserting sale fallback', e2);
+        }
+      } else {
+        console.error('failed inserting sale', e);
+      }
+    }
 
     return res.json({
       success: true,
       type: purchaseType,
       serial: voucher.serial,
-      pin: voucher.pin
+      pin: voucher.pin,
+      voucher: `${voucher.serial} | ${voucher.pin}`
     });
 
   } catch (err) {
-    console.error("verify-payment error", err?.response?.data || err);
+    console.error("verify-payment error", err?.response?.data || err?.message || err);
     return res.status(500).json({ error: "Server error" });
   }
 }

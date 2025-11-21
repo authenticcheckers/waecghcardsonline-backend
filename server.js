@@ -1,4 +1,4 @@
-// server.js — FINAL WITH BECE + WASSCE SUPPORT (robustified)
+// server.js — FINAL WITH BECE + WASSCE SUPPORT (fixed name issue)
 import pg from "pg";
 import express from "express";
 import dotenv from "dotenv";
@@ -45,7 +45,6 @@ const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "";
 
 const upload = multer({ dest: "uploads/" });
 
-// ------------------ Auth middleware ------------------
 function requireAuth(req, res, next) {
   try {
     const h = req.headers.authorization;
@@ -92,7 +91,6 @@ app.post("/admin/api/vouchers", requireAuth, async (req, res) => {
 
     const t = type && String(type).toUpperCase() === "BECE" ? "BECE" : "WASSCE";
 
-    // avoid crashing on duplicate serials
     await pool.query(
       "INSERT INTO vouchers (serial, pin, used, type) VALUES ($1,$2,false,$3) ON CONFLICT (serial) DO NOTHING",
       [serial.trim(), pin.trim(), t]
@@ -115,14 +113,12 @@ app.post("/admin/api/vouchers/bulk", requireAuth, upload.single("file"), async (
     fs.unlinkSync(req.file.path);
 
     const rows = parse(csv, { trim: true, skip_empty_lines: true });
-
     let inserted = 0;
 
     for (const r of rows) {
       const serial = r[0]?.toString().trim();
       const pin = r[1]?.toString().trim();
       const typeCSV = (r[2]?.toString().trim() || "WASSCE").toUpperCase();
-
       const type = ["WASSCE", "BECE"].includes(typeCSV) ? typeCSV : "WASSCE";
 
       if (!serial || !pin) continue;
@@ -134,7 +130,6 @@ app.post("/admin/api/vouchers/bulk", requireAuth, upload.single("file"), async (
            ON CONFLICT (serial) DO NOTHING`,
           [serial, pin, type]
         );
-        // count inserted only when rowCount > 0 (i.e., insert happened)
         if (resIns.rowCount && resIns.rowCount > 0) inserted++;
       } catch (e) {
         console.error('bulk row error', e?.message || e);
@@ -200,11 +195,12 @@ async function handleVerifyPayment(req, res) {
     if (!reference)
       return res.status(400).json({ error: "Missing reference" });
 
-    // safely compute purchaseType so undefined doesn't throw
-    const rawType = (req.method === "POST" ? req.body.type : req.query.type) || "WASSCE";
-    const purchaseType = String(rawType).toUpperCase() === "BECE" ? "BECE" : "WASSCE";
+    const rawType =
+      (req.method === "POST" ? req.body.type : req.query.type) || "WASSCE";
 
-    // Paystack verify
+    const purchaseType =
+      String(rawType).toUpperCase() === "BECE" ? "BECE" : "WASSCE";
+
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
@@ -216,13 +212,28 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
-    const email = result.data?.customer?.email || "";
-    const first = result.data?.customer?.first_name || "";
-    const last = result.data?.customer?.last_name || "";
-    const name = `${first} ${last}`.trim();
-    const phone = (req.method === "POST" ? req.body.phone : req.query.phone) || "";
+    const customer = result.data?.customer || {};
+    let name = "";
 
-    // ----------- Fetch a real unused voucher from DB by type -----------
+    const first = customer.first_name || "";
+    const last = customer.last_name || "";
+
+    if (first || last) {
+      name = `${first} ${last}`.trim();
+    }
+
+    // ******** FIX APPLIED HERE ********
+    if (!name || name.length < 2) {
+      name = req.method === "POST"
+        ? (req.body.name || "")
+        : (req.query.name || "");
+    }
+
+    const phone =
+      req.method === "POST" ? (req.body.phone || "") : (req.query.phone || "");
+
+    const email = customer.email || "";
+
     const v = await pool.query(
       `SELECT id, serial, pin FROM vouchers 
        WHERE used = false AND type = $1
@@ -237,13 +248,11 @@ async function handleVerifyPayment(req, res) {
 
     const voucher = v.rows[0];
 
-    // Mark as used
     await pool.query(
       "UPDATE vouchers SET used = true WHERE id = $1",
       [voucher.id]
     );
 
-    // Record sale (sales table must have a 'type' column; otherwise remove type)
     try {
       await pool.query(
         `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
@@ -251,19 +260,14 @@ async function handleVerifyPayment(req, res) {
         [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
       );
     } catch (e) {
-      // If sales table doesn't have 'type', fallback to inserting without it
       if (e && /column .* type .* does not exist/i.test(String(e))) {
-        try {
-          await pool.query(
-            `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, date)
-             VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
-            [name, phone, email, voucher.serial, voucher.pin, reference]
-          );
-        } catch (e2) {
-          console.error('failed inserting sale fallback', e2);
-        }
+        await pool.query(
+          `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, date)
+           VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+          [name, phone, email, voucher.serial, voucher.pin, reference]
+        );
       } else {
-        console.error('failed inserting sale', e);
+        console.error("failed inserting sale", e);
       }
     }
 
@@ -284,9 +288,7 @@ async function handleVerifyPayment(req, res) {
 app.get("/verify-payment", handleVerifyPayment);
 app.post("/verify-payment", handleVerifyPayment);
 
-// ------------------ health ------------------
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// ------------------ Start ------------------
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on ${port}`));

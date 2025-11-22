@@ -46,7 +46,7 @@ app.use((req, res, next) => {
 });
 
 // -----------------------------
-// DEBUG ENDPOINT (IMPORTANT)
+// DEBUG ENDPOINT
 // -----------------------------
 app.get("/__debug", (req, res) => {
   res.json({
@@ -71,11 +71,30 @@ async function handleVerifyPayment(req, res) {
         ? "BECE"
         : "WASSCE";
 
+    // -----------------------------
+    // LOAD PAYSTACK SECRET SAFELY
+    // -----------------------------
+    const PAYSTACK_SECRET =
+      process.env.PAYSTACK_SECRET ||
+      process.env.PAYSTACK_SECRET_KEY ||
+      process.env.PAYSTACK_PRIVATE_KEY ||
+      process.env.SECRET_KEY ||
+      "";
+
+    console.log("📌 Using Paystack Secret:", PAYSTACK_SECRET.slice(0, 6) + "********");
+
+    if (!PAYSTACK_SECRET.startsWith("sk_")) {
+      console.log("❌ INVALID PAYSTACK SECRET LOADED");
+      return res.status(500).json({ error: "Invalid Paystack secret key" });
+    }
+
+    // -----------------------------
     // VERIFY PAYSTACK
+    // -----------------------------
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       {
-        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
       }
     );
 

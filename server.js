@@ -5,20 +5,25 @@ import dotenv from "dotenv";
 import pkg from "pg";
 
 dotenv.config();
-
 const { Pool } = pkg;
 
+// -----------------------------
 // POSTGRES CONNECTION
+// -----------------------------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
+// -----------------------------
 // EXPRESS SETUP
+// -----------------------------
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// -----------------------------
 // CORS
+// -----------------------------
 app.use(cors({
   origin: [
     "https://waeccardsonline.vercel.app",
@@ -29,7 +34,9 @@ app.use(cors({
   allowedHeaders: ["Content-Type"]
 }));
 
+// -----------------------------
 // DEBUG LOGGER
+// -----------------------------
 app.use((req, res, next) => {
   console.log("\n===== NEW REQUEST =====");
   console.log("METHOD:", req.method);
@@ -38,7 +45,19 @@ app.use((req, res, next) => {
   next();
 });
 
+// -----------------------------
+// DEBUG ENDPOINT (IMPORTANT)
+// -----------------------------
+app.get("/__debug", (req, res) => {
+  res.json({
+    message: "NEW SERVER CODE ACTIVE",
+    env: Object.keys(process.env)
+  });
+});
+
+// -----------------------------
 // VERIFY PAYMENT
+// -----------------------------
 async function handleVerifyPayment(req, res) {
   try {
     const reference = req.body?.reference || req.query?.reference;
@@ -66,18 +85,17 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
-    // EXTRACT CUSTOMER
+    // CUSTOMER DETAILS
     const customer = result.data.customer || {};
     let name =
       `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
       req.body?.name ||
-      req.query?.name ||
       "";
 
-    const phone = req.body?.phone || req.query?.phone || "";
+    const phone = req.body?.phone || "";
     const email = customer.email || req.body?.email || "";
 
-    // GET UNUSED VOUCHER
+    // PICK UNUSED VOUCHER
     const v = await pool.query(
       `SELECT id, serial, pin 
        FROM vouchers 
@@ -99,7 +117,7 @@ async function handleVerifyPayment(req, res) {
       [voucher.id]
     );
 
-    // INSERT SALE
+    // SAVE SALE RECORD
     await pool.query(
       `INSERT INTO sales 
       (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
@@ -107,7 +125,7 @@ async function handleVerifyPayment(req, res) {
       [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
     );
 
-    // SUCCESS
+    // SUCCESS RESPONSE
     return res.json({
       success: true,
       type: purchaseType,
@@ -123,13 +141,14 @@ async function handleVerifyPayment(req, res) {
   }
 }
 
+// ROUTES
 app.post("/verify-payment", handleVerifyPayment);
 app.get("/verify-payment", handleVerifyPayment);
 
 // HEALTH
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// START
+// START SERVER
 app.listen(process.env.PORT || 3000, () =>
   console.log("Backend live on", process.env.PORT || 3000)
 );

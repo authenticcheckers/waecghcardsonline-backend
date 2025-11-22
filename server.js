@@ -8,22 +8,17 @@ dotenv.config();
 
 const { Pool } = pkg;
 
-////////////////////////////////////
 // POSTGRES CONNECTION
-////////////////////////////////////
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-////////////////////////////////////
 // EXPRESS SETUP
-////////////////////////////////////
 const app = express();
-
-// THE ONLY BODY PARSER — THIS FIXES EVERYTHING
 app.use(express.json({ limit: "2mb" }));
 
+// CORS
 app.use(cors({
   origin: [
     "https://waeccardsonline.vercel.app",
@@ -34,9 +29,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type"]
 }));
 
-////////////////////////////////////
-// DEBUG LOGGER (DO NOT REMOVE)
-////////////////////////////////////
+// DEBUG LOGGER
 app.use((req, res, next) => {
   console.log("\n===== NEW REQUEST =====");
   console.log("METHOD:", req.method);
@@ -45,16 +38,12 @@ app.use((req, res, next) => {
   next();
 });
 
-////////////////////////////////////
-// VERIFY PAYMENT ENDPOINT
-////////////////////////////////////
+// VERIFY PAYMENT
 async function handleVerifyPayment(req, res) {
   try {
-    // FIX 100%: read reference safely from body or query
     const reference = req.body?.reference || req.query?.reference;
 
     if (!reference) {
-      console.log("❌ Reference missing even after fallback!");
       return res.status(400).json({ error: "Missing reference" });
     }
 
@@ -63,12 +52,12 @@ async function handleVerifyPayment(req, res) {
         ? "BECE"
         : "WASSCE";
 
-    ////////////////////////////////
     // VERIFY PAYSTACK
-    ////////////////////////////////
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
-      { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET}` } }
+      {
+        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET}` }
+      }
     );
 
     const result = verify.data;
@@ -77,13 +66,8 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
-    console.log("✔ Paystack verification success");
-
-    ////////////////////////////////
-    // EXTRACT CUSTOMER INFO
-    ////////////////////////////////
+    // EXTRACT CUSTOMER
     const customer = result.data.customer || {};
-
     let name =
       `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
       req.body?.name ||
@@ -93,9 +77,7 @@ async function handleVerifyPayment(req, res) {
     const phone = req.body?.phone || req.query?.phone || "";
     const email = customer.email || req.body?.email || "";
 
-    ////////////////////////////////
     // GET UNUSED VOUCHER
-    ////////////////////////////////
     const v = await pool.query(
       `SELECT id, serial, pin 
        FROM vouchers 
@@ -111,37 +93,21 @@ async function handleVerifyPayment(req, res) {
 
     const voucher = v.rows[0];
 
-    ////////////////////////////////
-    // MARK VOUCHER USED
-    ////////////////////////////////
+    // MARK USED
     await pool.query(
       "UPDATE vouchers SET used = true WHERE id = $1",
       [voucher.id]
     );
 
-    ////////////////////////////////
-    // INSERT SALE (SAFE MODE)
-    ////////////////////////////////
-    try {
-      await pool.query(
-        `INSERT INTO sales 
-        (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-        [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
-      );
-    } catch (e) {
-      console.log("sales insert failed → trying fallback", e.message);
-      await pool.query(
-        `INSERT INTO sales 
-        (name, phone, email, voucher_serial, voucher_pin, reference, date)
-        VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
-        [name, phone, email, voucher.serial, voucher.pin, reference]
-      );
-    }
+    // INSERT SALE
+    await pool.query(
+      `INSERT INTO sales 
+      (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+      [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
+    );
 
-    ////////////////////////////////
-    // SUCCESS RESPONSE
-    ////////////////////////////////
+    // SUCCESS
     return res.json({
       success: true,
       type: purchaseType,
@@ -160,10 +126,10 @@ async function handleVerifyPayment(req, res) {
 app.post("/verify-payment", handleVerifyPayment);
 app.get("/verify-payment", handleVerifyPayment);
 
-// HEALTH CHECK
+// HEALTH
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// START SERVER
+// START
 app.listen(process.env.PORT || 3000, () =>
   console.log("Backend live on", process.env.PORT || 3000)
 );

@@ -253,6 +253,102 @@ app.get("/verify-payment", handleVerifyPayment);
 // HEALTH
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
+// -----------------------------
+// ADMIN LOGIN
+// -----------------------------
+app.post("/admin/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ success: false, message: "Missing credentials" });
+  }
+
+  if (
+    username === process.env.ADMIN_USERNAME &&
+    password === process.env.ADMIN_PASSWORD
+  ) {
+    return res.json({ success: true });
+  }
+
+  return res.status(401).json({ success: false, message: "Invalid credentials" });
+});
+
+// -----------------------------
+// ADMIN — LIST SALES
+// -----------------------------
+app.get("/admin/sales", async (req, res) => {
+  try {
+    const q = await pool.query(
+      `SELECT id, name, phone, email, voucher_serial, voucher_pin, reference, type, date 
+       FROM sales
+       ORDER BY date DESC`
+    );
+
+    res.json({ success: true, data: q.rows });
+  } catch (err) {
+    console.log("Error loading sales:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// -----------------------------
+// ADMIN — LIST VOUCHERS
+// -----------------------------
+app.get("/admin/vouchers", async (req, res) => {
+  try {
+    const q = await pool.query(
+      `SELECT id, serial, pin, type, used 
+       FROM vouchers
+       ORDER BY id ASC`
+    );
+
+    res.json({ success: true, data: q.rows });
+  } catch (err) {
+    console.log("Error loading vouchers:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// -----------------------------
+// ADMIN — UPLOAD VOUCHERS
+// -----------------------------
+app.post("/admin/upload", async (req, res) => {
+  try {
+    const vouchers = req.body?.vouchers;
+
+    if (!Array.isArray(vouchers)) {
+      return res.status(400).json({ success: false, message: "Invalid vouchers format" });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      for (const v of vouchers) {
+        await client.query(
+          `INSERT INTO vouchers (serial, pin, type, used) VALUES ($1, $2, $3, false)`,
+          [v.serial, v.pin, (v.type || "WASSCE").toUpperCase()]
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ success: true, message: "Vouchers uploaded" });
+
+  } catch (err) {
+    console.log("Upload error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
 // START SERVER
 app.listen(process.env.PORT || 3000, () =>
   console.log("Backend live on", process.env.PORT || 3000)

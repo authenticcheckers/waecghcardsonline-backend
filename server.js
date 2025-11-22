@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import pkg from "pg";
 
 dotenv.config();
@@ -19,6 +20,97 @@ const pool = new Pool({
 // EXPRESS SETUP
 // -----------------------------
 const app = express();
+
+// -----------------------------
+// RAW BODY ONLY FOR WEBHOOK
+// -----------------------------
+app.post(
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const secret = process.env.PAYSTACK_SECRET_KEY;
+      const signature = req.headers["x-paystack-signature"];
+
+      const computedHash = crypto
+        .createHmac("sha512", secret)
+        .update(req.body)
+        .digest("hex");
+
+      if (computedHash !== signature) {
+        console.log("❌ Invalid webhook signature");
+        return res.sendStatus(401);
+      }
+
+      const event = JSON.parse(req.body.toString());
+      console.log("\n🔥 PAYSTACK WEBHOOK:", event.event);
+
+      // Only accept charge.success
+      if (event.event !== "charge.success") {
+        return res.sendStatus(200);
+      }
+
+      const ref = event.data.reference;
+      const email = event.data.customer.email || "";
+      const name = `${event.data.customer.first_name || ""} ${
+        event.data.customer.last_name || ""
+      }`.trim();
+      const phone = event.data.customer.phone || "";
+      const purchaseType = "WASSCE";
+
+      // 1️⃣ CHECK IF ALREADY DELIVERED
+      const existing = await pool.query(
+        "SELECT * FROM sales WHERE reference = $1 LIMIT 1",
+        [ref]
+      );
+
+      if (existing.rows.length > 0) {
+        console.log("⚠️ Voucher already delivered:", ref);
+        return res.sendStatus(200);
+      }
+
+      // 2️⃣ PICK UNUSED VOUCHER
+      const v = await pool.query(
+        `SELECT id, serial, pin 
+         FROM vouchers 
+         WHERE used = false AND type = $1
+         ORDER BY id ASC LIMIT 1`,
+        [purchaseType]
+      );
+
+      if (v.rows.length === 0) {
+        console.log("❌ No vouchers available");
+        return res.sendStatus(500);
+      }
+
+      const voucher = v.rows[0];
+
+      // 3️⃣ MARK USED
+      await pool.query(
+        "UPDATE vouchers SET used = true WHERE id = $1",
+        [voucher.id]
+      );
+
+      // 4️⃣ SAVE SALE RECORD
+      await pool.query(
+        `INSERT INTO sales 
+        (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [name, phone, email, voucher.serial, voucher.pin, ref, purchaseType]
+      );
+
+      console.log("🎉 Voucher delivered via WEBHOOK:", voucher.serial);
+      return res.sendStatus(200);
+    } catch (err) {
+      console.log("❌ Webhook crash:", err);
+      return res.sendStatus(500);
+    }
+  }
+);
+
+// -----------------------------
+// JSON BODY FOR NORMAL ROUTES
+// -----------------------------
 app.use(express.json({ limit: "2mb" }));
 
 // -----------------------------
@@ -71,9 +163,7 @@ async function handleVerifyPayment(req, res) {
         ? "BECE"
         : "WASSCE";
 
-    // -----------------------------
     // LOAD PAYSTACK SECRET SAFELY
-    // -----------------------------
     const PAYSTACK_SECRET =
       process.env.PAYSTACK_SECRET ||
       process.env.PAYSTACK_SECRET_KEY ||
@@ -88,9 +178,7 @@ async function handleVerifyPayment(req, res) {
       return res.status(500).json({ error: "Invalid Paystack secret key" });
     }
 
-    // -----------------------------
     // VERIFY PAYSTACK
-    // -----------------------------
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       {
@@ -104,7 +192,6 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
-    // CUSTOMER DETAILS
     const customer = result.data.customer || {};
     let name =
       `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
@@ -144,7 +231,6 @@ async function handleVerifyPayment(req, res) {
       [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
     );
 
-    // SUCCESS RESPONSE
     return res.json({
       success: true,
       type: purchaseType,

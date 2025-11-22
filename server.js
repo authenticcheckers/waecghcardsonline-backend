@@ -116,15 +116,37 @@ app.use(express.json({ limit: "2mb" }));
 // -----------------------------
 // CORS
 // -----------------------------
-app.use(cors({
-  origin: [
-    "https://waeccardsonline.vercel.app",
-    "http://localhost:5500",
-    "http://localhost:3000"
-  ],
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
+// -----------------------------
+// FIXED CORS (FULL ADMIN SUPPORT)
+// -----------------------------
+const allowedOrigins = [
+  "https://waeccardsonline.vercel.app",
+  "http://localhost:5500",
+  "http://localhost:3000"
+];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+  }
+
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Credentials", "true");
+
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+
+  // Allow preflight to exit early
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 // -----------------------------
 // DEBUG LOGGER

@@ -45,20 +45,18 @@ app.post(
       const event = JSON.parse(req.body.toString());
       console.log("\n🔥 PAYSTACK WEBHOOK:", event.event);
 
-      // Only accept charge.success
+      // Only process charge.success
       if (event.event !== "charge.success") {
         return res.sendStatus(200);
       }
 
       const ref = event.data.reference;
       const email = event.data.customer.email || "";
-      const name = `${event.data.customer.first_name || ""} ${
-        event.data.customer.last_name || ""
-      }`.trim();
+      const name = `${event.data.customer.first_name || ""} ${event.data.customer.last_name || ""}`.trim();
       const phone = event.data.customer.phone || "";
       const purchaseType = "WASSCE";
 
-      // 1️⃣ CHECK IF ALREADY DELIVERED
+      // 1️⃣ Prevent multiple delivery
       const existing = await pool.query(
         "SELECT * FROM sales WHERE reference = $1 LIMIT 1",
         [ref]
@@ -69,7 +67,7 @@ app.post(
         return res.sendStatus(200);
       }
 
-      // 2️⃣ PICK UNUSED VOUCHER
+      // 2️⃣ Pick FIRST unused voucher
       const v = await pool.query(
         `SELECT id, serial, pin 
          FROM vouchers 
@@ -85,22 +83,23 @@ app.post(
 
       const voucher = v.rows[0];
 
-      // 3️⃣ MARK USED
+      // 3️⃣ Mark voucher as used
       await pool.query(
         "UPDATE vouchers SET used = true WHERE id = $1",
         [voucher.id]
       );
 
-      // 4️⃣ SAVE SALE RECORD
+      // 4️⃣ Save sale
       await pool.query(
         `INSERT INTO sales 
-        (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+         (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
         [name, phone, email, voucher.serial, voucher.pin, ref, purchaseType]
       );
 
       console.log("🎉 Voucher delivered via WEBHOOK:", voucher.serial);
       return res.sendStatus(200);
+
     } catch (err) {
       console.log("❌ Webhook crash:", err);
       return res.sendStatus(500);
@@ -114,10 +113,7 @@ app.post(
 app.use(express.json({ limit: "2mb" }));
 
 // -----------------------------
-// CORS
-// -----------------------------
-// -----------------------------
-// FIXED CORS (FULL ADMIN SUPPORT)
+// CORS (Fixed for Vercel Admin Panel)
 // -----------------------------
 const allowedOrigins = [
   "https://waeccardsonline.vercel.app",
@@ -140,10 +136,7 @@ app.use((req, res, next) => {
     "Content-Type, Authorization, X-Requested-With"
   );
 
-  // Allow preflight to exit early
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
+  if (req.method === "OPTIONS") return res.sendStatus(200);
 
   next();
 });
@@ -160,17 +153,7 @@ app.use((req, res, next) => {
 });
 
 // -----------------------------
-// DEBUG ENDPOINT
-// -----------------------------
-app.get("/__debug", (req, res) => {
-  res.json({
-    message: "NEW SERVER CODE ACTIVE",
-    env: Object.keys(process.env)
-  });
-});
-
-// -----------------------------
-// VERIFY PAYMENT
+// VERIFY PAYMENT (Fixed)
 // -----------------------------
 async function handleVerifyPayment(req, res) {
   try {
@@ -180,12 +163,6 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Missing reference" });
     }
 
-    const purchaseType =
-      String(req.body?.type || req.query?.type || "WASSCE").toUpperCase() === "BECE"
-        ? "BECE"
-        : "WASSCE";
-
-    // LOAD PAYSTACK SECRET SAFELY
     const PAYSTACK_SECRET =
       process.env.PAYSTACK_SECRET ||
       process.env.PAYSTACK_SECRET_KEY ||
@@ -195,12 +172,7 @@ async function handleVerifyPayment(req, res) {
 
     console.log("📌 Using Paystack Secret:", PAYSTACK_SECRET.slice(0, 6) + "********");
 
-    if (!PAYSTACK_SECRET.startsWith("sk_")) {
-      console.log("❌ INVALID PAYSTACK SECRET LOADED");
-      return res.status(500).json({ error: "Invalid Paystack secret key" });
-    }
-
-    // VERIFY PAYSTACK
+    // Verify Paystack payment
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       {
@@ -214,52 +186,25 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
-    const customer = result.data.customer || {};
-    let name =
-      `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
-      req.body?.name ||
-      "";
-
-    const phone = req.body?.phone || "";
-    const email = customer.email || req.body?.email || "";
-
-    // PICK UNUSED VOUCHER
-    const v = await pool.query(
-      `SELECT id, serial, pin 
-       FROM vouchers 
-       WHERE used = false AND type = $1
-       ORDER BY id ASC
-       LIMIT 1`,
-      [purchaseType]
+    // Check if webhook has already delivered voucher
+    const sale = await pool.query(
+      "SELECT voucher_serial, voucher_pin FROM sales WHERE reference = $1 LIMIT 1",
+      [reference]
     );
 
-    if (v.rows.length === 0) {
-      return res.status(500).json({ error: `${purchaseType} vouchers are sold out.` });
+    if (sale.rows.length === 0) {
+      return res.status(202).json({
+        success: false,
+        message: "Payment verified. Waiting for voucher delivery..."
+      });
     }
 
-    const voucher = v.rows[0];
-
-    // MARK USED
-    await pool.query(
-      "UPDATE vouchers SET used = true WHERE id = $1",
-      [voucher.id]
-    );
-
-    // SAVE SALE RECORD
-    await pool.query(
-      `INSERT INTO sales 
-      (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-      [name, phone, email, voucher.serial, voucher.pin, reference, purchaseType]
-    );
-
+    // Return voucher to frontend
     return res.json({
       success: true,
-      type: purchaseType,
-      serial: voucher.serial,
-      pin: voucher.pin,
-      voucher: `${voucher.serial} | ${voucher.pin}`,
-      reference
+      serial: sale.rows[0].voucher_serial,
+      pin: sale.rows[0].voucher_pin,
+      voucher: `${sale.rows[0].voucher_serial} | ${sale.rows[0].voucher_pin}`
     });
 
   } catch (err) {
@@ -268,12 +213,8 @@ async function handleVerifyPayment(req, res) {
   }
 }
 
-// ROUTES
 app.post("/verify-payment", handleVerifyPayment);
 app.get("/verify-payment", handleVerifyPayment);
-
-// HEALTH
-app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 // -----------------------------
 // ADMIN LOGIN
@@ -370,8 +311,9 @@ app.post("/admin/upload", async (req, res) => {
   }
 });
 
-
+// -----------------------------
 // START SERVER
+// -----------------------------
 app.listen(process.env.PORT || 3000, () =>
   console.log("Backend live on", process.env.PORT || 3000)
 );

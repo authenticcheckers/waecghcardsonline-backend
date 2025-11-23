@@ -88,6 +88,29 @@ app.post(
         "UPDATE vouchers SET used = true WHERE id = $1",
         [voucher.id]
       );
+// POST /admin/mark-used
+app.post("/admin/mark-used", async (req, res) => {
+  const { voucherCode } = req.body;
+
+  if (!voucherCode) {
+    return res.json({ status: false, message: "Voucher code required" });
+  }
+
+  try {
+    const update = await db.query(
+      "UPDATE vouchers SET used = true, used_at = NOW() WHERE code = $1 RETURNING *",
+      [voucherCode]
+    );
+
+    if (update.rowCount === 0) {
+      return res.json({ status: false, message: "Voucher not found" });
+    }
+
+    res.json({ status: true, message: "Voucher marked as used" });
+  } catch (err) {
+    res.json({ status: false, message: "Server error", error: err.message });
+  }
+});
 
       // 4️⃣ Save sale
       await pool.query(

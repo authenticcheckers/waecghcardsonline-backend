@@ -22,7 +22,33 @@ const pool = new Pool({
 const app = express();
 
 // -----------------------------
+// CORS (APPLIED EARLY so ALL routes get CORS headers)
+// -----------------------------
+const allowedOrigins = [
+  "https://waeccardsonline.vercel.app",
+  "http://localhost:5500",
+  "http://localhost:3000"
+];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+  }
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
+// -----------------------------
 // RAW BODY ONLY FOR WEBHOOK
+// Keep this route BEFORE express.json() so raw body is preserved
 // -----------------------------
 app.post(
   "/webhook",
@@ -45,6 +71,7 @@ app.post(
       const event = JSON.parse(req.body.toString());
       console.log("\n🔥 PAYSTACK WEBHOOK:", event.event);
 
+      // Only process charge.success
       if (event.event !== "charge.success") {
         return res.sendStatus(200);
       }
@@ -107,13 +134,13 @@ app.post(
 );
 
 // -----------------------------
-// NORMAL JSON BODY PARSER
+// JSON BODY FOR NORMAL ROUTES
 // -----------------------------
 app.use(express.json({ limit: "2mb" }));
 
 // -----------------------------
-// ADMIN — MARK VOUCHER AS USED  
-// (CORRECTLY PLACED OUTSIDE WEBHOOK)
+// ADMIN — MARK VOUCHER AS USED
+// (Placed after webhook and after express.json middleware)
 // -----------------------------
 app.post("/admin/mark-used", async (req, res) => {
   const { serial } = req.body;
@@ -125,8 +152,8 @@ app.post("/admin/mark-used", async (req, res) => {
   try {
     const update = await pool.query(
       `UPDATE vouchers 
-       SET used = true, used_at = NOW() 
-       WHERE serial = $1 
+       SET used = true
+       WHERE serial = $1
        RETURNING *`,
       [serial]
     );
@@ -140,34 +167,6 @@ app.post("/admin/mark-used", async (req, res) => {
     console.log("❌ mark-used error:", err);
     res.json({ status: false, message: "Server error" });
   }
-});
-
-// -----------------------------
-// CORS (Vercel Admin Panel)
-// -----------------------------
-const allowedOrigins = [
-  "https://waeccardsonline.vercel.app",
-  "http://localhost:5500",
-  "http://localhost:3000"
-];
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  if (allowedOrigins.includes(origin)) {
-    res.header("Access-Control-Allow-Origin", origin);
-  }
-
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Credentials", "true");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
-
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-
-  next();
 });
 
 // -----------------------------
@@ -201,6 +200,7 @@ async function handleVerifyPayment(req, res) {
 
     console.log("📌 Using Paystack Secret:", PAYSTACK_SECRET.slice(0, 6) + "********");
 
+    // Verify Paystack payment
     const verify = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       {
@@ -214,6 +214,7 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
+    // Check if webhook has already delivered voucher
     const sale = await pool.query(
       "SELECT voucher_serial, voucher_pin FROM sales WHERE reference = $1 LIMIT 1",
       [reference]
@@ -226,6 +227,7 @@ async function handleVerifyPayment(req, res) {
       });
     }
 
+    // Return voucher to frontend
     return res.json({
       success: true,
       serial: sale.rows[0].voucher_serial,

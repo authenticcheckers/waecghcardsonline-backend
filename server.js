@@ -89,17 +89,21 @@ app.post(
         [voucher.id]
       );
 // POST /admin/mark-used
+// ADMIN — MARK VOUCHER AS USED
 app.post("/admin/mark-used", async (req, res) => {
-  const { voucherCode } = req.body;
+  const { serial } = req.body;
 
-  if (!voucherCode) {
+  if (!serial) {
     return res.json({ status: false, message: "Voucher code required" });
   }
 
   try {
-    const update = await db.query(
-      "UPDATE vouchers SET used = true, used_at = NOW() WHERE code = $1 RETURNING *",
-      [voucherCode]
+    const update = await pool.query(
+      `UPDATE vouchers 
+       SET used = true, used_at = NOW() 
+       WHERE serial = $1 
+       RETURNING *`,
+      [serial]
     );
 
     if (update.rowCount === 0) {
@@ -108,9 +112,11 @@ app.post("/admin/mark-used", async (req, res) => {
 
     res.json({ status: true, message: "Voucher marked as used" });
   } catch (err) {
-    res.json({ status: false, message: "Server error", error: err.message });
+    console.log("❌ mark-used error:", err);
+    res.json({ status: false, message: "Server error" });
   }
 });
+
 
       // 4️⃣ Save sale
       await pool.query(

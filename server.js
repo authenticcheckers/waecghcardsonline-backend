@@ -15,9 +15,10 @@ async function sendSMS(phone, text) {
     const res = await axios.post(
       "https://sms.arkesel.com/api/v2/sms/send",
       {
-        sender: "Arkesel", // Replace with approved sender ID
+        sender: "Arkesel",
         message: text,
-        recipients: [phone.replace(/^0/, "233")] // Converts 0XXXXXXXXX → 233XXXXXXXXX
+        type: "sms",                   // ✅ REQUIRED
+        recipients: [phone.replace(/^0/, "233")]
       },
       {
         headers: {
@@ -32,6 +33,7 @@ async function sendSMS(phone, text) {
     console.log("❌ SMS ERROR:", error.response?.data || error.message);
   }
 }
+
 
 
 dotenv.config();

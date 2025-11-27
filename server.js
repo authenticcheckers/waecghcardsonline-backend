@@ -1,5 +1,5 @@
-// UPDATED BACKEND WITH SEPARATE WASSCE + BECE HANDLING
-// CLEAN, SAFE, NOTHING BROKEN.
+// server.js (updated)
+// CLEAN, SAFE, NOTHING BROKEN + MULTI-VOUCHER & RETRIEVE SUPPORT
 
 import express from "express";
 import cors from "cors";
@@ -39,7 +39,7 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Credentials", "true");
   res.header(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
+    "Content-Type, Authorization, X-Requested-With, x-paystack-signature"
   );
 
   if (req.method === "OPTIONS") return res.sendStatus(200);
@@ -56,7 +56,6 @@ app.post(
     try {
       const secret = process.env.PAYSTACK_SECRET_KEY;
       const signature = req.headers["x-paystack-signature"];
-
       const computedHash = crypto
         .createHmac("sha512", secret)
         .update(req.body)
@@ -77,48 +76,64 @@ app.post(
       const ref = event.data.reference;
       const metadata = event.data.metadata || {};
       const purchaseType = (metadata.voucher_type || "WASSCE").toUpperCase();
+      const quantity = Number(metadata.quantity || 1);
 
-      const email = event.data.customer.email || "";
-      const name = `${event.data.customer.first_name || ""} ${event.data.customer.last_name || ""}`.trim();
-      const phone = event.data.customer.phone || metadata.phone || "";
+      const email = event.data.customer?.email || "";
+      const name = `${event.data.customer?.first_name || ""} ${event.data.customer?.last_name || ""}`.trim();
+      const phone = event.data.customer?.phone || metadata.phone || "";
 
-      // prevent duplicate
+      // prevent duplicate deliveries for this reference
       const exists = await pool.query(
         "SELECT 1 FROM sales WHERE reference = $1 LIMIT 1",
         [ref]
       );
 
       if (exists.rows.length > 0) {
-        console.log("⚠️ Already delivered", ref);
+        console.log("⚠️ Already delivered for reference", ref);
         return res.sendStatus(200);
       }
 
-      // pick voucher of correct type
-      const v = await pool.query(
-        `SELECT id, serial, pin
-         FROM vouchers
-         WHERE used = false AND type = $1
-         ORDER BY id ASC LIMIT 1`,
-        [purchaseType]
-      );
+      // pick `quantity` vouchers of requested type
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
 
-      if (v.rows.length === 0) {
-        console.log("❌ No vouchers available for", purchaseType);
+        const vRes = await client.query(
+          `SELECT id, serial, pin FROM vouchers
+           WHERE used = false AND type = $1
+           ORDER BY id ASC
+           LIMIT $2 FOR UPDATE`,
+          [purchaseType, quantity]
+        );
+
+        if (vRes.rows.length < quantity) {
+          // Not enough vouchers to fulfill the order; rollback & report error.
+          await client.query("ROLLBACK");
+          console.log(`❌ Insufficient vouchers: requested ${quantity}, available ${vRes.rows.length}`);
+          return res.sendStatus(500);
+        }
+
+        // Mark each voucher used and insert a sales row for each one
+        for (const v of vRes.rows) {
+          await client.query("UPDATE vouchers SET used = true WHERE id = $1", [v.id]);
+
+          await client.query(
+            `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+            [name, phone, email, v.serial, v.pin, ref, purchaseType]
+          );
+        }
+
+        await client.query("COMMIT");
+        console.log("🎉 Delivered", vRes.rows.map(x=>x.serial).join(", "), purchaseType, `x${quantity}`);
+        return res.sendStatus(200);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.log("❌ Webhook transaction error", err);
         return res.sendStatus(500);
+      } finally {
+        client.release();
       }
-
-      const voucher = v.rows[0];
-
-      await pool.query("UPDATE vouchers SET used = true WHERE id = $1", [voucher.id]);
-
-      await pool.query(
-        `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-        [name, phone, email, voucher.serial, voucher.pin, ref, purchaseType]
-      );
-
-      console.log("🎉 Delivered via webhook", voucher.serial, purchaseType);
-      return res.sendStatus(200);
 
     } catch (err) {
       console.log("❌ Webhook crash", err);
@@ -150,24 +165,25 @@ async function handleVerifyPayment(req, res) {
       return res.status(400).json({ error: "Payment failed" });
     }
 
-    // get sale
-    const sale = await pool.query(
-      `SELECT voucher_serial, voucher_pin FROM sales WHERE reference=$1 LIMIT 1`,
+    // return all sales rows for this reference (may be multiple)
+    const sales = await pool.query(
+      `SELECT voucher_serial AS serial, voucher_pin AS pin, type, date
+       FROM sales WHERE reference = $1 ORDER BY date ASC`,
       [reference]
     );
 
-    if (sale.rows.length === 0) {
+    if (sales.rows.length === 0) {
+      // Payment verified but webhook hasn't delivered vouchers yet
       return res.status(202).json({
-        success: false,
+        success: true,
+        vouchers: [],
         message: "Verified. Waiting for voucher delivery..."
       });
     }
 
     return res.json({
       success: true,
-      serial: sale.rows[0].voucher_serial,
-      pin: sale.rows[0].voucher_pin,
-      voucher: `${sale.rows[0].voucher_serial} | ${sale.rows[0].voucher_pin}`
+      vouchers: sales.rows
     });
 
   } catch (err) {
@@ -178,6 +194,38 @@ async function handleVerifyPayment(req, res) {
 
 app.post("/verify-payment", handleVerifyPayment);
 app.get("/verify-payment", handleVerifyPayment);
+
+// -----------------------------
+// RETRIEVE VOUCHERS ROUTE
+// -----------------------------
+app.get("/retrieve-vouchers", async (req, res) => {
+  try {
+    const { phone, email } = req.query;
+    if (!phone && !email) return res.status(400).json({ success: false, message: "Provide phone or email" });
+
+    const params = [];
+    let where = "";
+    if (phone) {
+      params.push(phone);
+      where = "phone = $1";
+    } else {
+      params.push(email);
+      where = "email = $1";
+    }
+
+    const q = await pool.query(
+      `SELECT voucher_serial AS serial, voucher_pin AS pin, type, date
+       FROM sales WHERE ${where}
+       ORDER BY date DESC`,
+      params
+    );
+
+    res.json({ success: true, vouchers: q.rows });
+  } catch (err) {
+    console.log("❌ retrieve-vouchers error", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 // -----------------------------
 // ADMIN & UTIL ROUTES (UNCHANGED)
@@ -248,5 +296,3 @@ app.post("/admin/upload", async (req, res) => {
 app.listen(process.env.PORT || 3000, () =>
   console.log("Backend live on", process.env.PORT || 3000)
 );
-
-// Backend updates for BECE separation will go here.

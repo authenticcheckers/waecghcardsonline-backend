@@ -77,6 +77,12 @@ app.post(
       const metadata = event.data.metadata || {};
       const purchaseType = (metadata.voucher_type || "WASSCE").toUpperCase();
       const quantity = Number(metadata.quantity || 1);
+      // enforce max purchase limit
+if (quantity > 30) {
+  console.log(`❌ Blocked webhook: quantity ${quantity} exceeds limit of 30`);
+  return res.sendStatus(400);
+}
+
 
       const email = event.data.customer?.email || "";
       const name = `${event.data.customer?.first_name || ""} ${event.data.customer?.last_name || ""}`.trim();
@@ -161,6 +167,17 @@ async function handleVerifyPayment(req, res) {
     );
 
     const result = verify.data;
+    const metadata = result.data?.metadata || {};
+const quantity = Number(metadata.quantity || 1);
+
+// enforce max purchase on verify
+if (quantity > 30) {
+  return res.status(400).json({
+    success: false,
+    error: "Maximum 30 vouchers allowed per purchase"
+  });
+}
+
     if (!result?.status || result.data?.status !== "success") {
       return res.status(400).json({ error: "Payment failed" });
     }

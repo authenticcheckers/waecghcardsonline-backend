@@ -155,6 +155,12 @@ if (quantity > 30) {
             [name, phone, email, v.serial, v.pin, ref, purchaseType]
           );
         }
+// SEND SMS immediately after inserting
+const smsText = 
+  `${purchaseType} Voucher\n` +
+  `SERIAL: ${v.serial}\nPIN: ${v.pin}\nThank you for using WaecGhCardsOnline.com`;
+
+sendSMS(phone, smsText);
 
         await client.query("COMMIT");
         console.log("🎉 Delivered", vRes.rows.map(x=>x.serial).join(", "), purchaseType, `x${quantity}`);

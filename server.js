@@ -8,14 +8,16 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import pkg from "pg";
 
-async function sendSMS(to, message) {
+
+
+async function sendSMS(phone, text) {
   try {
     const res = await axios.post(
-      "https://sms.arkesel.com/api/v2/messages/send",
+      "https://sms.arkesel.com/api/v2/sms/send",
       {
-        sender: process.env.SENDER_ID || "WaecCards",
-        message,
-        recipients: [to]
+        sender: "Arkesel", // Replace with approved sender ID
+        message: text,
+        recipients: [phone.replace(/^0/, "233")] // Converts 0XXXXXXXXX → 233XXXXXXXXX
       },
       {
         headers: {
@@ -25,14 +27,12 @@ async function sendSMS(to, message) {
       }
     );
 
-    console.log("📨 SMS sent:", res.data);
-    return true;
-
-  } catch (err) {
-    console.log("❌ SMS ERROR:", err.response?.data || err.message);
-    return false;
+    console.log("✔ SMS SENT:", res.data);
+  } catch (error) {
+    console.log("❌ SMS ERROR:", error.response?.data || error.message);
   }
 }
+
 
 dotenv.config();
 const { Pool } = pkg;

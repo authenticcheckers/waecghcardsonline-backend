@@ -15,10 +15,10 @@ async function sendSMS(phone, text) {
     const res = await axios.post(
       "https://sms.arkesel.com/api/v2/sms/send",
       {
-        sender: "RESONLINE",             // ✔ Your correct approved sender ID
+        sender: "RESONLINE",   // approved sender ID
         message: text,
-        type: "sms",                     // ✔ REQUIRED by Arkesel v2
-        recipients: [phone.replace(/^0/, "233")] // ✔ Format: 233XXXXXXXXX
+        type: "sms",           // required by Arkesel
+        recipients: [phone.replace(/^0/, "233")]
       },
       {
         headers: {
@@ -29,18 +29,11 @@ async function sendSMS(phone, text) {
     );
 
     console.log("✔ SMS SENT:", res.data);
+
   } catch (error) {
     console.log("❌ SMS ERROR:", error.response?.data || error.message);
   }
 }
-
-    console.log("✔ SMS SENT:", res.data);
-  } catch (error) {
-    console.log("❌ SMS ERROR:", error.response?.data || error.message);
-  }
-}
-
-
 
 dotenv.config();
 const { Pool } = pkg;

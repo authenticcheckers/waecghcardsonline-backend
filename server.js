@@ -341,6 +341,69 @@ app.post("/admin/upload", async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No CSV file uploaded" });
+
+    const rows = [];
+
+    const Readable = await import("stream").then(m => m.Readable);
+    const stream = Readable.from(req.file.buffer.toString());
+
+    await new Promise((resolve, reject) => {
+      stream
+        .pipe(csv())
+        .on("data", row => rows.push(row))
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    if (rows.length === 0) {
+      return res.status(400).json({ error: "CSV is empty" });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const insertQuery = `
+        INSERT INTO checkers (serial, pin, type, year, is_used)
+        VALUES ($1, $2, $3, $4, false)
+        ON CONFLICT (serial) DO NOTHING
+      `;
+
+      let insertedCount = 0;
+
+      for (const r of rows) {
+        const { Serial, PIN, Type, Year } = r;
+
+        await client.query(insertQuery, [
+          Serial,
+          PIN,
+          Type,
+          Year
+        ]);
+
+        insertedCount++;
+      }
+
+      await client.query("COMMIT");
+
+      res.json({ message: "Upload complete", inserted: insertedCount });
+
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Server error processing CSV" });
+  }
+});
 
 // -----------------------------
 // SERVER START

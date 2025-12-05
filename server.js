@@ -56,7 +56,8 @@ const app = express();
 const allowedOrigins = [
   "https://waeccardsonline.vercel.app",
   "http://localhost:5500",
-  "http://localhost:3000"
+  "http://localhost:3000",
+  "https://waeccheckers.com"
 ];
 
 app.use((req, res, next) => {

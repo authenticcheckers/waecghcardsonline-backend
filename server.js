@@ -185,6 +185,7 @@ sendSMS(phone, smsText);
 );
 
 app.use(express.json({ limit: "2mb" }));
+console.log("WEBHOOK REF:", event.data.reference);
 
 // -----------------------------
 // VERIFY PAYMENT (FRONTEND CALL)

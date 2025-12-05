@@ -98,6 +98,7 @@ app.post(
 
       const event = JSON.parse(req.body.toString());
       console.log("\n🔥 PAYSTACK WEBHOOK:", event.event);
+      console.log("WEBHOOK REF:", event.data.reference);
 
       if (event.event !== "charge.success") {
         return res.sendStatus(200);
@@ -185,7 +186,6 @@ sendSMS(phone, smsText);
 );
 
 app.use(express.json({ limit: "2mb" }));
-console.log("WEBHOOK REF:", event.data.reference);
 
 // -----------------------------
 // VERIFY PAYMENT (FRONTEND CALL)

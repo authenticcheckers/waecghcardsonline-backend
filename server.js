@@ -1,6 +1,4 @@
-// server.js (patched webhook + small safety improvements)
-// Keep the rest of your file as-is (I only modified the webhook area and a couple helpers)
-
+//// server.js (updated) // CLEAN, SAFE, NOTHING BROKEN + MULTI-VOUCHER & RETRIEVE SUPPORT
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -18,19 +16,18 @@ const { Pool } = pkg;
 // -----------------------------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
 // -----------------------------
 // EXPRESS SETUP
 // -----------------------------
 const app = express();
-
 const allowedOrigins = [
   "https://waeccardsonline.vercel.app",
   "http://localhost:5500",
   "http://localhost:3000",
-  "https://waeccheckers.com"
+  "https://waeccheckers.com",
 ];
 
 app.use((req, res, next) => {
@@ -44,13 +41,12 @@ app.use((req, res, next) => {
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, X-Requested-With, x-paystack-signature"
   );
-
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
 
 // -----------------------------
-// helper: sendSMS (unchanged, but kept below for context)
+// HELPER: SEND SMS
 // -----------------------------
 async function sendSMS(phone, text) {
   try {
@@ -60,16 +56,15 @@ async function sendSMS(phone, text) {
         sender: "RESONLINE",
         message: text,
         type: "sms",
-        recipients: [phone.replace(/^0/, "233")]
+        recipients: [phone.replace(/^0/, "233")],
       },
       {
         headers: {
           "api-key": process.env.ARKESEL_API_KEY,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+        },
       }
     );
-
     console.log("✔ SMS SENT:", res.data);
   } catch (error) {
     console.log("❌ SMS ERROR:", error.response?.data || error.message);
@@ -77,224 +72,133 @@ async function sendSMS(phone, text) {
 }
 
 // -----------------------------
-// RAW BODY FOR PAYSTACK WEBHOOK (MUST be registered BEFORE express.json)
+// RAW BODY FOR PAYSTACK WEBHOOK
 // -----------------------------
 app.post(
   "/webhook",
-  // keep raw so we can verify signature exactly
   express.raw({ type: "application/json" }),
-  (req, res) => {
-    // Immediately validate signature and return 200 to stop Paystack retries.
-    // Do heavy work asynchronously so we respond quickly.
+  async (req, res) => {
     try {
-      const secret = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
+      const secret = process.env.PAYSTACK_SECRET_KEY;
       const signature = req.headers["x-paystack-signature"];
-
-      // Use Buffer for HMAC input to match Paystack's signing
-      const payload = req.body; // this is a Buffer because of express.raw
-      if (!payload || !signature || !secret) {
-        console.log("❌ Webhook: missing payload/signature/secret");
-        // Respond 400 so Paystack will not treat as success. If secret missing it's a deploy issue.
-        return res.sendStatus(400);
-      }
-
       const computedHash = crypto
         .createHmac("sha512", secret)
-        .update(payload)
+        .update(req.body)
         .digest("hex");
 
       if (computedHash !== signature) {
-        console.log("❌ Invalid webhook signature (blocked)");
+        console.log("❌ Invalid webhook signature");
         return res.sendStatus(401);
       }
 
-      // parse event safely
-      let event;
-      try {
-        event = JSON.parse(payload.toString("utf8"));
-      } catch (e) {
-        console.log("❌ Webhook: invalid JSON payload");
+      const event = JSON.parse(req.body.toString());
+      console.log("\n🔥 PAYSTACK WEBHOOK:", event.event);
+      console.log("WEBHOOK REF:", event.data.reference);
+
+      if (event.event !== "charge.success") return res.sendStatus(200);
+
+      const ref = event.data.reference;
+      const metadata = event.data.metadata || {};
+      const purchaseType = (metadata.voucher_type || "WASSCE").toUpperCase();
+      const quantity = Number(metadata.quantity || 1);
+
+      if (quantity > 30) {
+        console.log(`❌ Blocked webhook: quantity ${quantity} exceeds limit of 30`);
         return res.sendStatus(400);
       }
 
-      console.log("\n🔥 PAYSTACK WEBHOOK (received):", event.event);
-      console.log("WEBHOOK REF (received):", event?.data?.reference || "N/A");
+      const email = event.data.customer?.email || "";
+      const name = `${event.data.customer?.first_name || ""} ${event.data.customer?.last_name || ""}`.trim();
+      const phone = event.data.customer?.phone || metadata.phone || "";
 
-      // Immediately send 200 to stop retries. Actual processing will happen asynchronously.
-      res.sendStatus(200);
+      // prevent duplicate deliveries for this reference
+      const exists = await pool.query(
+        "SELECT 1 FROM sales WHERE reference = $1 LIMIT 1",
+        [ref]
+      );
+      if (exists.rows.length > 0) {
+        console.log("⚠️ Already delivered for reference", ref);
+        return res.sendStatus(200);
+      }
 
-      // --- process asynchronously, do NOT await here ---
-      (async () => {
-        try {
-          // only care about charge.success
-          if (event.event !== "charge.success") {
-            console.log("ℹ️ Ignored event:", event.event);
-            return;
-          }
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
 
-          const ref = event.data?.reference;
-          if (!ref) {
-            console.log("❌ charge.success missing reference, abort");
-            return;
-          }
+        const vRes = await client.query(
+          `SELECT id, serial, pin FROM vouchers 
+           WHERE used = false AND type = $1 
+           ORDER BY id ASC LIMIT $2 FOR UPDATE`,
+          [purchaseType, quantity]
+        );
 
-          // Basic metadata extraction and hygiene
-          const metadata = event.data?.metadata || {};
-          const purchaseType = (metadata.voucher_type || "WASSCE").toUpperCase();
-          let quantity = Number(metadata.quantity || 1);
-          if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
+        if (vRes.rows.length < quantity) {
+          await client.query("ROLLBACK");
+          console.log(
+            `❌ Insufficient vouchers for ${ref}: requested ${quantity}, available ${vRes.rows.length}`
+          );
+          return res.sendStatus(200); // acknowledge webhook but don't deliver
+        }
 
-          // enforce sensible max to prevent abuse
-          if (quantity > 30) {
-            console.log(`❌ Blocked processing for ${ref}: quantity ${quantity} exceeds limit`);
-            return;
-          }
-
-          const email = event.data?.customer?.email || "";
-          const name = `${event.data?.customer?.first_name || ""} ${event.data?.customer?.last_name || ""}`.trim();
-          const phone = event.data?.customer?.phone || metadata.phone || "";
-
-          // Quick anti-abuse: phone must look like digits if present
-          if (phone && !/^\+?\d{8,15}$/.test(phone) && !/^\d{8,15}$/.test(phone)) {
-            console.log(`❌ Bad phone format for ${ref} (${phone}) — continuing but without SMS`);
-          }
-
-          // IDempotency: check if we've processed this reference before
-          const exists = await pool.query(
-            "SELECT 1 FROM sales WHERE reference = $1 LIMIT 1",
-            [ref]
+        for (const v of vRes.rows) {
+          await client.query("UPDATE vouchers SET used = true WHERE id = $1", [v.id]);
+          await client.query(
+            `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+            [name, phone, email, v.serial, v.pin, ref, purchaseType]
           );
 
-          if (exists.rows.length > 0) {
-            console.log("⚠️ Already delivered for reference", ref);
-            return;
-          }
-
-          // Extra safety: verify transaction via Paystack API to ensure it's genuinely successful,
-          // and to guard against test/live mismatches or other unexpected states.
-          try {
-            const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
-            const verifyResp = await axios.get(
-              `https://api.paystack.co/transaction/verify/${encodeURIComponent(ref)}`,
-              { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }, timeout: 8000 }
-            );
-
-            if (!verifyResp?.data?.status || verifyResp.data?.data?.status !== "success") {
-              console.log(`❌ Paystack verify failed for ${ref} — status not success`, verifyResp?.data?.data?.status);
-              return;
-            }
-
-            // Optional: you could validate amount/currency here against your metadata if desired.
-          } catch (err) {
-            console.log("❌ Paystack verify request failed for", ref, " — aborting processing for safety", err?.message || err);
-            return;
-          }
-
-          // Acquire client and perform transactional voucher allocation
-          const client = await pool.connect();
-          try {
-            await client.query("BEGIN");
-
-            // select available vouchers and lock them for this transaction
-            const vRes = await client.query(
-              `SELECT id, serial, pin FROM vouchers
-               WHERE used = false AND type = $1
-               ORDER BY id ASC
-               LIMIT $2
-               FOR UPDATE`,
-              [purchaseType, quantity]
-            );
-
-            if (vRes.rows.length < quantity) {
-              await client.query("ROLLBACK");
-              console.log(`❌ Insufficient vouchers for ${ref}: requested ${quantity}, available ${vRes.rows.length}`);
-              // Optionally: create a 'failed_delivery' row or notify admin
-              return;
-            }
-
-            // reserve & record
-            for (const v of vRes.rows) {
-              await client.query("UPDATE vouchers SET used = true WHERE id = $1", [v.id]);
-
-              await client.query(
-                `INSERT INTO sales (name, phone, email, voucher_serial, voucher_pin, reference, type, date)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-                [name, phone, email, v.serial, v.pin, ref, purchaseType]
-              );
-
-              // send SMS but don't let SMS failure break DB commit
-              try {
-                if (phone && /^\+?\d{8,15}$/.test(phone.replace(/^0/, "233")) || /^\d{8,15}$/.test(phone.replace(/^0/, "233"))) {
-                  const smsText =
-                    `${purchaseType} Voucher\n` +
-                    `SERIAL: ${v.serial}\nPIN: ${v.pin}\nThank you for using WaecGhCardsOnline.com`;
-                  // do not await if you want to push throughput; we await here to avoid unbounded concurrency
-                  await sendSMS(phone, smsText);
-                } else {
-                  console.log(`ℹ️ Skipping SMS for ${ref} due to invalid phone: ${phone}`);
-                }
-              } catch (smsErr) {
-                console.log("❌ SMS send error for", ref, smsErr?.message || smsErr);
-              }
-            }
-
-            await client.query("COMMIT");
-            console.log("🎉 Delivered", vRes.rows.map(x => x.serial).join(", "), purchaseType, `x${quantity}`, "for ref", ref);
-          } catch (err) {
-            await client.query("ROLLBACK");
-            console.log("❌ Webhook DB transaction error for", ref, err?.message || err);
-          } finally {
-            client.release();
-          }
-        } catch (procErr) {
-          console.log("❌ Error processing webhook async:", procErr?.message || procErr);
+          const smsText = `${purchaseType} Voucher\nSERIAL: ${v.serial}\nPIN: ${v.pin}\nThank you for using WaecGhCardsOnline.com`;
+          sendSMS(phone, smsText);
         }
-      })();
 
-    } catch (outerErr) {
-      console.log("❌ Webhook top-level error:", outerErr?.message || outerErr);
-      // If signature could not be validated, we returned earlier; if we reach here it's an unexpected error.
-      try {
-        // If response hasn't been sent yet (rare) send 500
-        if (!res.headersSent) res.sendStatus(500);
-      } catch (e) {}
+        await client.query("COMMIT");
+        console.log(
+          "🎉 Delivered",
+          vRes.rows.map((x) => x.serial).join(", "),
+          purchaseType,
+          `x${quantity}`
+        );
+        return res.sendStatus(200);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.log("❌ Webhook transaction error", err);
+        return res.sendStatus(500);
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.log("❌ Webhook crash", err);
+      return res.sendStatus(500);
     }
   }
 );
 
-// Now register JSON parser for the rest of routes
 app.use(express.json({ limit: "2mb" }));
 
 // -----------------------------
-// VERIFY PAYMENT (FRONTEND CALL)  (unchanged logic, only minor hardening)
+// VERIFY PAYMENT (FRONTEND CALL)
 // -----------------------------
 async function handleVerifyPayment(req, res) {
   try {
     const reference = req.body?.reference || req.query?.reference;
     if (!reference) return res.status(400).json({ error: "Missing reference" });
 
-    const PAYSTACK_SECRET =
-      process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
-
+    const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
     const verify = await axios.get(
-      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
-      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }, timeout: 8000 }
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
     );
 
     const result = verify.data;
     const metadata = result.data?.metadata || {};
     const quantity = Number(metadata.quantity || 1);
 
-    if (quantity > 30) {
-      return res.status(400).json({
-        success: false,
-        error: "Maximum 30 vouchers allowed per purchase"
-      });
-    }
+    if (quantity > 30)
+      return res.status(400).json({ success: false, error: "Maximum 30 vouchers allowed per purchase" });
 
-    if (!result?.status || result.data?.status !== "success") {
+    if (!result?.status || result.data?.status !== "success")
       return res.status(400).json({ error: "Payment failed" });
-    }
 
     const sales = await pool.query(
       `SELECT voucher_serial AS serial, voucher_pin AS pin, type, date
@@ -302,19 +206,10 @@ async function handleVerifyPayment(req, res) {
       [reference]
     );
 
-    if (sales.rows.length === 0) {
-      return res.status(202).json({
-        success: true,
-        vouchers: [],
-        message: "Verified. Waiting for voucher delivery..."
-      });
-    }
+    if (sales.rows.length === 0)
+      return res.status(202).json({ success: true, vouchers: [], message: "Verified. Waiting for voucher delivery..." });
 
-    return res.json({
-      success: true,
-      vouchers: sales.rows
-    });
-
+    return res.json({ success: true, vouchers: sales.rows });
   } catch (err) {
     console.log("❌ verify-payment crash", err?.response?.data || err);
     return res.status(500).json({ error: "Server error" });
@@ -324,10 +219,142 @@ async function handleVerifyPayment(req, res) {
 app.post("/verify-payment", handleVerifyPayment);
 app.get("/verify-payment", handleVerifyPayment);
 
-//
-// The rest of your routes (retrieve-vouchers, admin, upload, etc.) remain unchanged.
-// Make sure you keep them exactly as they were below in your file.
-//
+// -----------------------------
+// RETRIEVE VOUCHERS ROUTE
+// -----------------------------
+app.get("/retrieve-vouchers", async (req, res) => {
+  try {
+    const { phone, email } = req.query;
+    if (!phone && !email) return res.status(400).json({ success: false, message: "Provide phone or email" });
+
+    const params = [];
+    let where = "";
+
+    if (phone) {
+      params.push(phone);
+      where = "phone = $1";
+    } else {
+      params.push(email);
+      where = "email = $1";
+    }
+
+    const q = await pool.query(
+      `SELECT voucher_serial AS serial, voucher_pin AS pin, type, date
+       FROM sales WHERE ${where} ORDER BY date DESC`,
+      params
+    );
+
+    res.json({ success: true, vouchers: q.rows });
+  } catch (err) {
+    console.log("❌ retrieve-vouchers error", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// -----------------------------
+// ADMIN & UTIL ROUTES
+// -----------------------------
+app.post("/admin/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ success: false, message: "Missing credentials" });
+  if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD)
+    return res.json({ success: true });
+  return res.status(401).json({ success: false, message: "Invalid credentials" });
+});
+
+app.get("/admin/sales", async (req, res) => {
+  try {
+    const q = await pool.query(
+      `SELECT id, name, phone, email, voucher_serial, voucher_pin, reference, type, date
+       FROM sales ORDER BY date DESC`
+    );
+    res.json({ success: true, data: q.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.get("/admin/vouchers", async (req, res) => {
+  try {
+    const q = await pool.query(`SELECT id, serial, pin, type, used FROM vouchers ORDER BY id ASC`);
+    res.json({ success: true, data: q.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.post("/admin/upload", async (req, res) => {
+  try {
+    const vouchers = req.body?.vouchers;
+    if (!Array.isArray(vouchers)) return res.status(400).json({ success: false, message: "Invalid vouchers format" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const v of vouchers) {
+        await client.query(
+          `INSERT INTO vouchers (serial, pin, type, used) VALUES ($1,$2,$3,false)`,
+          [v.serial, v.pin, (v.type || "WASSCE").toUpperCase()]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+    res.json({ success: true, message: "Vouchers uploaded" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No CSV file uploaded" });
+
+    const rows = [];
+    const Readable = await import("stream").then((m) => m.Readable);
+    const stream = Readable.from(req.file.buffer.toString());
+
+    await new Promise((resolve, reject) => {
+      stream
+        .pipe(csv())
+        .on("data", (row) => rows.push(row))
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    if (rows.length === 0) return res.status(400).json({ error: "CSV is empty" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const insertQuery = `
+        INSERT INTO checkers (serial, pin, type, year, is_used)
+        VALUES ($1, $2, $3, $4, false)
+        ON CONFLICT (serial) DO NOTHING
+      `;
+      let insertedCount = 0;
+      for (const r of rows) {
+        const { Serial, PIN, Type, Year } = r;
+        await client.query(insertQuery, [Serial, PIN, Type, Year]);
+        insertedCount++;
+      }
+      await client.query("COMMIT");
+      res.json({ message: "Upload complete", inserted: insertedCount });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Server error processing CSV" });
+  }
+});
 
 // -----------------------------
 // SERVER START

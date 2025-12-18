@@ -1,4 +1,3 @@
-//// server.js (updated) // CLEAN, SAFE, NOTHING BROKEN + MULTI-VOUCHER & RETRIEVE SUPPORT
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -310,6 +309,9 @@ app.post("/admin/upload", async (req, res) => {
   }
 });
 
+// -----------------------------
+// FIXED CSV UPLOAD ROUTE
+// -----------------------------
 app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No CSV file uploaded" });
@@ -331,17 +333,27 @@ app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+
+      // MODIFIED: Insert into 'vouchers' so they are available for sale
       const insertQuery = `
-        INSERT INTO checkers (serial, pin, type, year, is_used)
-        VALUES ($1, $2, $3, $4, false)
+        INSERT INTO vouchers (serial, pin, type, used)
+        VALUES ($1, $2, $3, false)
         ON CONFLICT (serial) DO NOTHING
       `;
+      
       let insertedCount = 0;
       for (const r of rows) {
-        const { Serial, PIN, Type, Year } = r;
-        await client.query(insertQuery, [Serial, PIN, Type, Year]);
-        insertedCount++;
+        // Handle Capitalized or Lowercase CSV headers
+        const serial = r.Serial || r.serial;
+        const pin = r.PIN || r.pin || r.Pin;
+        const type = r.Type || r.type || "WASSCE";
+
+        if (serial && pin) {
+            await client.query(insertQuery, [serial, pin, type.toUpperCase()]);
+            insertedCount++;
+        }
       }
+
       await client.query("COMMIT");
       res.json({ message: "Upload complete", inserted: insertedCount });
     } catch (err) {

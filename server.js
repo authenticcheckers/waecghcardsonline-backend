@@ -316,6 +316,9 @@ app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No CSV file uploaded" });
 
+    // Retrieve type from the FormData (sent via frontend dropdown)
+    const batchType = req.body.type;
+
     const rows = [];
     const Readable = await import("stream").then((m) => m.Readable);
     const stream = Readable.from(req.file.buffer.toString());
@@ -346,7 +349,8 @@ app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
         // Handle Capitalized or Lowercase CSV headers
         const serial = r.Serial || r.serial;
         const pin = r.PIN || r.pin || r.Pin;
-        const type = r.Type || r.type || "WASSCE";
+        // Use batchType if provided (from dropdown), otherwise fallback to CSV column
+        const type = batchType || r.Type || r.type || "WASSCE";
 
         if (serial && pin) {
             await client.query(insertQuery, [serial, pin, type.toUpperCase()]);

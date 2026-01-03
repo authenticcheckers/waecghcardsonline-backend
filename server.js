@@ -309,29 +309,25 @@ app.post("/admin/upload", async (req, res) => {
   }
 });
 
-// --- UPDATE THIS ROUTE IN YOUR BACKEND ---
 app.put("/admin/voucher/void/:id", async (req, res) => {
   try {
     const { id } = req.params;
     
-    // This marks the voucher as used (TRUE)
+    // Setting used to true AND recording the current time in used_at
     const result = await pool.query(
-      "UPDATE vouchers SET used = true WHERE id = $1", 
+      "UPDATE vouchers SET used = true, used_at = NOW() WHERE id = $1", 
       [id]
     );
 
     if (result.rowCount > 0) {
-      res.json({ success: true, message: "Voucher marked as used." });
+      res.json({ success: true });
     } else {
-      res.status(404).json({ success: false, message: "Voucher not found." });
+      res.status(404).json({ success: false, message: "Voucher not found" });
     }
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(500).json({ error: err.message });
   }
 });
-// -----------------------------
-// FIXED CSV UPLOAD ROUTE (UPDATED)
 // -----------------------------
 app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
   try {

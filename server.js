@@ -310,7 +310,7 @@ app.post("/admin/upload", async (req, res) => {
 });
 
 // -----------------------------
-// FIXED CSV UPLOAD ROUTE
+// FIXED CSV UPLOAD ROUTE (UPDATED)
 // -----------------------------
 app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
   try {
@@ -337,7 +337,6 @@ app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
     try {
       await client.query("BEGIN");
 
-      // MODIFIED: Insert into 'vouchers' so they are available for sale
       const insertQuery = `
         INSERT INTO vouchers (serial, pin, type, used)
         VALUES ($1, $2, $3, false)
@@ -346,14 +345,18 @@ app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
       
       let insertedCount = 0;
       for (const r of rows) {
-        // Handle Capitalized or Lowercase CSV headers
-        const serial = r.Serial || r.serial;
+        const serial = r.Serial || r.serial || r.SERIAL;
         const pin = r.PIN || r.pin || r.Pin;
-        // Use batchType if provided (from dropdown), otherwise fallback to CSV column
-        const type = batchType || r.Type || r.type || "WASSCE";
+
+        // UPDATED LOGIC: 
+        // 1. Check dropdown (batchType) first.
+        // 2. Check CSV columns next.
+        // 3. Final fallback is "BECE" to avoid accidental "WASSCE" labeling.
+        const type = batchType || r.Type || r.type || r.TYPE || "BECE";
 
         if (serial && pin) {
-            await client.query(insertQuery, [serial, pin, type.toUpperCase()]);
+            // .trim() ensures no accidental spaces from the CSV break the database
+            await client.query(insertQuery, [serial.trim(), pin.trim(), type.trim().toUpperCase()]);
             insertedCount++;
         }
       }
@@ -370,7 +373,7 @@ app.post("/upload-checkers-csv", upload.single("file"), async (req, res) => {
     console.error(error);
     res.status(500).json({ error: "Server error processing CSV" });
   }
-});
+});;
 
 // -----------------------------
 // SERVER START

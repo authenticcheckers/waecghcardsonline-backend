@@ -309,6 +309,27 @@ app.post("/admin/upload", async (req, res) => {
   }
 });
 
+// --- UPDATE THIS ROUTE IN YOUR BACKEND ---
+app.put("/admin/voucher/void/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // This marks the voucher as used (TRUE)
+    const result = await pool.query(
+      "UPDATE vouchers SET used = true WHERE id = $1", 
+      [id]
+    );
+
+    if (result.rowCount > 0) {
+      res.json({ success: true, message: "Voucher marked as used." });
+    } else {
+      res.status(404).json({ success: false, message: "Voucher not found." });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 // -----------------------------
 // FIXED CSV UPLOAD ROUTE (UPDATED)
 // -----------------------------

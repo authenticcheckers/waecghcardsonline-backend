@@ -180,7 +180,15 @@ app.post("/webhook", async (req, res) => {
 
     const data = body.data || {};
 
-    // Verify the webhook secret (doc field: secret — "A unique string to verify that the callback is from Moolre")
+    // Log the webhook secret so you can capture it and set MOOLRE_WEBHOOK_SECRET in your env
+    if (data.secret) {
+      console.log(`🔑 Moolre webhook secret received: ${data.secret}`);
+      if (!MOOLRE_WEBHOOK_SECRET) {
+        console.log("💡 Tip: set MOOLRE_WEBHOOK_SECRET=" + data.secret + " in your env to enable webhook verification");
+      }
+    }
+
+    // Verify the webhook secret only if MOOLRE_WEBHOOK_SECRET is set in env
     if (MOOLRE_WEBHOOK_SECRET && data.secret !== MOOLRE_WEBHOOK_SECRET) {
       console.warn("❌ Invalid Moolre webhook secret — ignoring");
       return res.sendStatus(401);

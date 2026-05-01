@@ -97,10 +97,9 @@ function normalisePhone(phone) {
   return p;
 }
 
-// Moolre requires 233XXXXXXXXX (12 digits total)
+// Moolre actually expects local format 0XXXXXXXXX (despite docs saying 233XXXXXXXXX)
 function toMoolrePhone(phone) {
-  const p = normalisePhone(phone);
-  return p.startsWith("0") ? "233" + p.slice(1) : p;
+  return normalisePhone(phone);
 }
 
 // Validate a normalised local phone (0XXXXXXXXX = 10 digits, starting with 0)

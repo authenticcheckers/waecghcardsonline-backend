@@ -91,16 +91,22 @@ function parseExternalRef(ref) {
 // Normalise any Ghanaian phone format → 0XXXXXXXXX
 function normalisePhone(phone) {
   if (!phone) return "";
-  const p = String(phone).replace(/\s+/g, "");
+  const p = String(phone).replace(/[\s\-().]/g, ""); // strip spaces, dashes, parens, dots
   if (p.startsWith("+233")) return "0" + p.slice(4);
   if (p.startsWith("233"))  return "0" + p.slice(3);
   return p;
 }
 
-// Moolre requires 233XXXXXXXXX
+// Moolre requires 233XXXXXXXXX (12 digits total)
 function toMoolrePhone(phone) {
   const p = normalisePhone(phone);
   return p.startsWith("0") ? "233" + p.slice(1) : p;
+}
+
+// Validate a normalised local phone (0XXXXXXXXX = 10 digits, starting with 0)
+function isValidGhanaPhone(phone) {
+  const p = normalisePhone(phone);
+  return /^0[235]\d{8}$/.test(p); // MTN:024/054/055/059, Telecel:020/050, AT:027/057/026
 }
 
 async function sendSMS(phone, text) {
@@ -261,7 +267,14 @@ app.post("/initiate-payment", async (req, res) => {
     const channel     = NETWORK_CHANNELS[network] || NETWORK_CHANNELS.MTN;
     const amount      = 30 * Number(quantity); // GHS 30 per voucher
     const externalref = buildExternalRef(type, quantity);
-    const payerPhone  = toMoolrePhone(phone);
+
+    if (!isValidGhanaPhone(phone)) {
+      console.warn(`❌ Invalid phone rejected before Moolre: raw="${phone}" normalised="${normalisePhone(phone)}"`);
+      return res.status(400).json({ success: false, error: "Invalid phone number. Please enter a valid 10-digit Ghanaian number starting with 0 (e.g. 0244123456)." });
+    }
+
+    const payerPhone = toMoolrePhone(phone);
+    console.log(`📞 Phone: raw="${phone}" → normalised="${normalisePhone(phone)}" → Moolre="${payerPhone}"`);
 
     // Save to pending_payments so webhook/verify can recover phone+name without
     // relying on Moolre returning payer in the status response (not always present)

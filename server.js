@@ -254,7 +254,7 @@ app.post("/webhook", async (req, res) => {
 // ─────────────────────────────────────────
 app.post("/initiate-payment", async (req, res) => {
   try {
-    const { phone, name, type, quantity, network, otpcode } = req.body;
+    const { phone, name, type, quantity, network, otpcode, externalref_hint } = req.body;
 
     if (!phone || !type || !quantity) {
       return res.status(400).json({ success: false, error: "Missing required fields: phone, type, quantity" });
@@ -263,9 +263,16 @@ app.post("/initiate-payment", async (req, res) => {
       return res.status(400).json({ success: false, error: "Maximum 30 vouchers per purchase" });
     }
 
-    const channel     = NETWORK_CHANNELS[network] || NETWORK_CHANNELS.MTN;
-    const amount      = 30 * Number(quantity); // GHS 30 per voucher
-    const externalref = buildExternalRef(type, quantity);
+    const channel = NETWORK_CHANNELS[network] || NETWORK_CHANNELS.MTN;
+    const amount  = 30 * Number(quantity); // GHS 30 per voucher
+
+    // When resubmitting with an OTP, reuse the original externalref so Moolre
+    // can match it to the pending verification — generating a new one causes
+    // Moolre to treat it as a fresh transaction and send another OTP indefinitely.
+    const externalref = (otpcode && externalref_hint) ? externalref_hint : buildExternalRef(type, quantity);
+    if (otpcode && externalref_hint) {
+      console.log(`🔁 OTP resubmission — reusing externalref: ${externalref}`);
+    }
 
     if (!isValidGhanaPhone(phone)) {
       console.warn(`❌ Invalid phone rejected before Moolre: raw="${phone}" normalised="${normalisePhone(phone)}"`);

@@ -24,9 +24,15 @@ pool.query(`
     name          TEXT,
     type          TEXT NOT NULL,
     quantity      INTEGER NOT NULL,
+    moolre_txid   TEXT,
     created_at    TIMESTAMPTZ DEFAULT NOW()
   )
 `).catch(err => console.error("⚠️ pending_payments table init failed:", err.message));
+
+// Add moolre_txid column if it doesn't exist (for existing deployments)
+pool.query(`
+  ALTER TABLE pending_payments ADD COLUMN IF NOT EXISTS moolre_txid TEXT
+`).catch(() => {});
 
 // ─────────────────────────────────────────
 // EXPRESS
@@ -320,18 +326,28 @@ app.post("/initiate-payment", async (req, res) => {
       return res.json({ success: true, status: "otp_required", externalref, message: result.message });
     }
 
-    // TP15 → OTP verified: frontend must re-submit without OTP to trigger USSD prompt
-    if (result.code === "TP15") {
+    // TP15 / TP17 → OTP verified: frontend must re-submit WITHOUT OTP to trigger USSD prompt
+    if (result.code === "TP15" || result.code === "TP17") {
       return res.json({ success: true, status: "otp_verified", externalref, message: result.message });
     }
 
     // TR099 → USSD prompt sent to customer's phone
+    // result.data contains Moolre's internal transaction UUID — save it for status checks
     if (result.code === "TR099") {
+      const moolreTransactionId = typeof result.data === "string" ? result.data : null;
+      if (moolreTransactionId) {
+        // Save the Moolre UUID so verify-payment can use idtype:2 for accurate status checks
+        await pool.query(
+          `UPDATE pending_payments SET moolre_txid = $1 WHERE externalref = $2`,
+          [moolreTransactionId, externalref]
+        ).catch(() => {}); // best-effort — column may not exist yet, migration handles it
+      }
       return res.json({
-        success: true,
-        status:  "pending",
+        success:              true,
+        status:               "pending",
         externalref,
-        message: "Payment prompt sent to your phone. Approve with your Mobile Money PIN.",
+        moolre_transaction_id: moolreTransactionId,
+        message:              "Payment prompt sent to your phone. Approve with your Mobile Money PIN.",
       });
     }
 
@@ -371,16 +387,25 @@ async function handleVerifyPayment(req, res) {
     }
 
     // 2. Not yet delivered — ask Moolre for current status
-    // Note: per updated docs, the status response data may not include payer,
-    // so we rely on pending_payments table for phone/name.
+    // Use Moolre's internal transaction UUID (idtype:2) if we have it — much more reliable.
+    // Fall back to externalref (idtype:1) if not available.
     let moolreTxStatus = null;
     try {
+      const pendingForStatus = await pool.query(
+        "SELECT moolre_txid FROM pending_payments WHERE externalref = $1",
+        [externalref]
+      );
+      const moolreTxid = pendingForStatus.rows[0]?.moolre_txid;
+      const useIdType  = moolreTxid ? 2 : 1;  // 2 = Moolre generated ID, 1 = externalref
+      const useId      = moolreTxid || externalref;
+      console.log(`🔍 Status check: idtype=${useIdType} id=${useId}`);
+
       const statusRes = await axios.post(
         `${MOOLRE_API}/open/transact/status`,
         {
           type:          1,
-          idtype:        1,       // 1 = unique externalref
-          id:            externalref,
+          idtype:        useIdType,
+          id:            useId,
           accountnumber: MOOLRE_ACCOUNT_NUMBER,
         },
         { headers: moolreHeaders }
